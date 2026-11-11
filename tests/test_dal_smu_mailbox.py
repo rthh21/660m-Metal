@@ -24,7 +24,7 @@ def objdump():
 
 
 def disasm(start, stop):
-    out = subprocess.run([objdump(), '-d', '--no-show-raw-insn', '--start-address=' + hex(start),
+    out = subprocess.run([objdump(), '-d', '--no-show-raw-insn', '--no-print-imm-hex', '--start-address=' + hex(start),
                           '--stop-address=' + hex(stop), str(FB)], capture_output=True, text=True, check=True).stdout
     rows = []
     for line in out.splitlines():
@@ -77,7 +77,7 @@ class DalSmuMailbox(unittest.TestCase):
         self.assertIn('movl $2, %esi', msg2.values())
 
     def test_no_other_fb_mailbox_users(self):
-        out = subprocess.run([objdump(), '-d', '--no-show-raw-insn', str(FB)], capture_output=True, text=True,
+        out = subprocess.run([objdump(), '-d', '--no-show-raw-insn', '--no-print-imm-hex', str(FB)], capture_output=True, text=True,
                              check=True).stdout
         hits = sorted(int(m.group(1), 16) for m in re.finditer(r'^\s*([0-9a-f]+):\s+\S+\s+\$(?:90739|90740|90762),',
                                                                  out, re.M))

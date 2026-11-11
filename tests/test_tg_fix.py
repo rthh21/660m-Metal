@@ -16,7 +16,7 @@ def objdump():
 
 
 def disasm(start, stop):
-    out = subprocess.run([objdump(), '-d', '--no-show-raw-insn', '--start-address=' + hex(start),
+    out = subprocess.run([objdump(), '-d', '--no-show-raw-insn', '--no-print-imm-hex', '--start-address=' + hex(start),
                           '--stop-address=' + hex(stop), str(FB)], capture_output=True, text=True, check=True).stdout
     rows = {}
     for line in out.splitlines():
