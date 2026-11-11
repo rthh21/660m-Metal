@@ -1,0 +1,10 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ x86_64-macos ]
+install-name:    '/usr/lib/libobjc.A.dylib'
+current-version: 1
+compatibility-version: 1
+exports:
+  - targets:         [ x86_64-macos ]
+    symbols:         [ _objc_getClass, _sel_registerName, _objc_msgSend, _objc_autoreleasePoolPush, _objc_autoreleasePoolPop ]
+...

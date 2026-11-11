@@ -1,0 +1,48 @@
+*.o
+*.d
+__pycache__/
+*.pyc
+.DS_Store
+src/Rembrandt660M/Rembrandt660M
+src/Rembrandt660M/Rembrandt660M.kext/
+src/Rembrandt660M/fw/
+src/Rembrandt660M/fw.tmp/
+build/*.log
+build/dist_backups/
+build/src_backups*/
+build/*_2026*
+build/*.plist
+build/re_xhci_*/
+build/wifi_*/
+evidence/macos_out_2026*
+# backups, archives, local outputs and raw dumps stay out of git (kept on disk)
+*.zip
+*.rar
+*.7z
+*.tar.gz
+build/src_backups/
+build/metaltest_*/
+build/tests/
+evidence/photos_*/
+
+# 660m-Metal holds only the video implementation: kext source, its build inputs, tests and tools.
+# Everything below stays on disk but out of git (EFI, logs, reverse-engineering dumps, reports, old diffs).
+EFItest
+/evidence/*
+# VBIOS images are Lenovo/AMD firmware: never committed (the kext reads VFCT at boot)
+/evidence/vbios/
+*.rom
+/reports/
+/patches/
+/preboot/
+/build/*
+!/build/Lilu-1.7.3-ABI-checked/
+!/build/runtime-inputs/
+*.log
+PACKAGE_INFO.json
+PROVENANCE.md
+SHA256SUMS.txt
+ORIGINAL_680M_README.md
+src/acpi/
+tests/test_i2cpoll.py
+/deps/

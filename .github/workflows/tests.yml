@@ -1,0 +1,25 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Offline CPU-only contracts. Apple inputs (25G229 KDK, Boot/System KC) are not in the repository, so the
+# byte-level cases that need them report "skipped"; run the same files locally with KDK_EXTENSIONS / BOOT_KC /
+# IOGDIAG_*_KC set for the full check. Building the kext needs macOS, the KDK and MacKernelSDK and is not done here.
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Contract tests
+        run: |
+          for t in tests/test_*.py; do
+            echo "::group::$t"
+            python "$t" -v
+            echo "::endgroup::"
+          done
