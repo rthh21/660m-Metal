@@ -1,6 +1,7 @@
 //
 //  Kernel message buffer → /private/var/log/rmb-msgbuf.log, fsynced every 0.5 s, appended across
-//  boots (a short hung boot's log survives the next one; reset past 256 KB).
+//  boots (a short hung boot's log survives the next one; reset past 256 KB, after the last 768 KB
+//  of the previous boot are copied to rmb-msgbuf.prev.log).
 //  Bare metal has no serial port and a hung boot is powered off before logd flushes, so this
 //  file is the only record of RembrandtGfx/AMD driver messages. Read it from Linux with
 //  apfs-fuse (Data volume). `-rmbnodisklog` turns it off.
@@ -29,6 +30,12 @@ MsgBuf **gMsgbufp;
 // boot only (~300 KB for 2 min); a short hung boot (<256 KB) is still kept for the next one.
 constexpr off_t MaxLog = 256 << 10;
 constexpr const char *LogPath = "/private/var/log/rmb-msgbuf.log";
+// 2026-11-12: a 3 h boot froze (GPU hang, screens green/black) and the restart above wiped the only
+// record of its last minutes. Before restarting, the end of the previous file goes to PrevPath.
+// The log grows ~400 KB/min on this machine (Wi-Fi scan + vblank spam), so 768 KB ≈ the last 2 min;
+// kept under the ~0.9 MB limit of the Windows reader.
+constexpr int PrevKeep = 768 << 10;
+constexpr const char *PrevPath = "/private/var/log/rmb-msgbuf.prev.log";
 
 // Stall detector (bare metal: an NVMe write timeout froze all disk I/O, the kernel kept running
 // but nothing after it reached the file). gBusyAt = mach time a write+flush started (0 = idle),
@@ -60,6 +67,46 @@ void put(vnode_t vp, vfs_context_t ctx, off_t &off, const char *p, int len) {
 	if (!vn_rdwr(UIO_WRITE, vp, const_cast<char *>(p), len, off, UIO_SYSSPACE, IO_UNIT | IO_NOAUTH,
 		vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx)))
 		off += len - resid;
+}
+
+// Copy the last PrevKeep bytes of LogPath (size bytes long), from a whole line on, to PrevPath.
+// Runs before LogPath is truncated, so a hang in here loses nothing.
+void savePrevTail(vfs_context_t ctx, off_t size) {
+	off_t from = size > PrevKeep ? size - PrevKeep : 0;
+	int len = static_cast<int>(size - from);
+	char *buf = len > 0 ? static_cast<char *>(IOMalloc(static_cast<vm_size_t>(len))) : nullptr;
+	if (!buf)
+		return;
+	vnode_t src = nullptr, dst = nullptr;
+	int resid = 0;
+	if (!vnode_open(LogPath, FREAD, 0, 0, &src, ctx)) {
+		if (vn_rdwr(UIO_READ, src, buf, len, from, UIO_SYSSPACE, IO_NOAUTH, vfs_context_ucred(ctx), &resid,
+				vfs_context_proc(ctx)))
+			resid = len;
+		vnode_close(src, FREAD, ctx);
+	} else {
+		resid = len;
+	}
+	int got = len - resid, s = 0;
+	if (from)
+		while (s < got && buf[s++] != '\n') {
+		}
+	if (got > s && !vnode_open(PrevPath, O_CREAT | FWRITE, 0644, 0, &dst, ctx)) {
+		struct vnode_attr va;
+		VATTR_INIT(&va);
+		VATTR_SET(&va, va_data_size, 0);
+		vnode_setattr(dst, &va, ctx);
+		char hdr[128];
+		int h = snprintf(hdr, sizeof(hdr), "======== disklog: end of the previous boot (last %d of %lld KB) ========\n",
+			(got - s) >> 10, static_cast<long long>(size >> 10));
+		off_t o = 0;
+		put(dst, ctx, o, hdr, h < static_cast<int>(sizeof(hdr)) ? h : static_cast<int>(sizeof(hdr)) - 1);
+		put(dst, ctx, o, buf + s, got - s);
+		VNOP_FSYNC(dst, MNT_WAIT, ctx);
+		VNOP_IOCTL(dst, F_FULLFSYNC, nullptr, 0, ctx);
+		vnode_close(dst, FWRITE, ctx);
+	}
+	IOFree(buf, static_cast<vm_size_t>(len));
 }
 
 void diskLogThread(void *, wait_result_t) {
@@ -113,8 +160,11 @@ void diskLogThread(void *, wait_result_t) {
 			struct vnode_attr va;
 			VATTR_INIT(&va);
 			VATTR_WANTED(&va, va_data_size);
-			off = vnode_getattr(vp, &va, ctx) ? MaxLog + 1 : va.va_data_size;
+			bool sized = !vnode_getattr(vp, &va, ctx);
+			off = sized ? static_cast<off_t>(va.va_data_size) : MaxLog + 1;
 			if (off > MaxLog) {
+				if (sized)
+					savePrevTail(ctx, off);
 				off = 0;
 				VATTR_INIT(&va);
 				VATTR_SET(&va, va_data_size, 0);
