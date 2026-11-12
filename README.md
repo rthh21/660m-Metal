@@ -25,8 +25,7 @@
 **Contents:**
 [What this is](#what-this-is) ·
 [What works](#what-works) ·
-[Install on another laptop](#install-on-another-laptop) ·
-[Install on the Lenovo 82TL](#install-on-the-lenovo-82tl) ·
+[Install guide](#install-guide-step-by-step) ·
 [External display](#external-display-through-a-usb-c-hub) ·
 [GPU clock](#gpu-clock) ·
 [Video decode](#hardware-video-decode) ·
@@ -47,7 +46,7 @@ display engine, panel timings and the UMD tiling. It doesn't replace Apple's kex
 
 It was developed and tested bare metal on a **Lenovo laptop, machine type 82TL** (Ryzen 5 6600HS, 3072×1920
 120 Hz panel), booted by OpenCore. The kext in `dist/` works on that laptop as it is. Other 660M laptops need a
-rebuild with their own VBIOS values; [Install on another laptop](#install-on-another-laptop) walks through it.
+rebuild with their own VBIOS values; the [Install guide](#install-guide-step-by-step) walks through it from the start.
 This repository holds only the graphics implementation, not a full EFI.
 
 ---
@@ -65,7 +64,7 @@ This repository holds only the graphics implementation, not a full EFI.
 | **Smooth cursor** | Works | Fixes the 2 s cursor steps (`xhciintr`: xHCI interrupter 1 on a single MSI) |
 | **Hardware video decode (VCN)** | Works | H.264 and HEVC (8 and 10 bit) up to 4K on VCN 3.1, Safari playback with 0 frames dropped. Encode stays in software, VP9 and AV1 are not available (see [below](#hardware-video-decode)) |
 | **GPU and memory clock** | Works | `gfxclk` keeps the GPU clock under the PMFW current limiter's trip point and raises FCLK to 1600 MHz while the GPU is busy (see [below](#gpu-clock)) |
-| **VRAM** | Partial | 2 GB carve-out (the BIOS UMA size) |
+| **VRAM** | Partial | Carve-out of the BIOS UMA size (2 GB and 4 GB run on the 82TL) |
 | **Sleep** | No | The laptop only reaches DarkWake, not S3 |
 
 The kext also carries two small non-graphics helpers that the same boot depends on: the xHCI interrupter fix
@@ -77,149 +76,387 @@ above and `wlanfix` (turns off 10-bit tags on the root port of an MT7922 Wi-Fi c
 
 ---
 
-## Install on another laptop
+## Install guide (step by step)
 
-This is the path for any laptop with a Radeon 660M other than the Lenovo 82TL. It has **not been tested on
-other hardware yet**: expect to read logs. Plan on an afternoon.
+This guide is for someone who has never installed macOS on a PC. It goes from a laptop running Windows to
+macOS with full graphics acceleration. Read it once to the end before you start, then do the steps in order.
+
+- Copy every command exactly. Replace text in `<angle brackets>` with your own value, without the brackets.
+- Each step says what you should see. If you see something else, stop and go to
+  [If something goes wrong](#if-something-goes-wrong). Don't skip ahead.
+- **Be honest with yourself about the risk.** The kext has only run on one laptop, a Lenovo 82TL. On any other
+  computer you are the first person to try it. It may not work, and you may need to read logs and open an issue.
+
+> [!IMPORTANT]
+> Installing macOS erases a whole disk or partition. **Back up everything** before step 6. If Windows uses
+> BitLocker, write down its recovery key first (**Settings → Privacy & security → Device encryption**, or
+> [aka.ms/myrecoverykey](https://aka.ms/myrecoverykey)): after the BIOS changes in step 2, Windows will ask for it.
 
 ### What you need
 
 | | |
 |---|---|
-| **GPU** | Radeon 660M, PCI ID `1002:1681` (Ryzen 5 6600H/HS/U and similar). The Radeon 680M has the same PCI ID but twice the compute units and was never run with this kext |
-| **macOS** | Tahoe 26.7 build **25G229** exactly |
-| **A working hackintosh without acceleration** | OpenCore with the AMD Vanilla kernel patches, a USB map, keyboard and storage working. Without this kext macOS boots on the firmware framebuffer, slow but usable |
-| **A Linux live USB** | Used once, to read the VBIOS and the memory size (any recent Ubuntu or Fedora) |
-| **Build tools** | Xcode Command Line Tools, the 25G229 Kernel Debug Kit and [MacKernelSDK](https://github.com/acidanthera/MacKernelSDK). The laptop itself can build, running macOS without acceleration |
+| **A computer with a Radeon 660M** | Checked in [step 1](#step-1-check-your-gpu) |
+| **Two USB sticks** | 32 GB or more for the macOS installer, 8 GB or more for Linux. Both are erased |
+| **A Mac for about an hour** | To download the exact macOS version (step 5). Without a Mac it still works, it just takes longer |
+| **Internet in macOS** | A USB Ethernet adapter is the easy way. The laptop's Wi-Fi may not work in macOS at first |
+| **A free Apple ID** | Only if you have to build the kext (step 7) |
+| **Time** | Plan a full day the first time |
 
-### Why the kext must be rebuilt
+### Step 1: Check your GPU
 
-The kext has two safety checks that stop it on unknown hardware:
+In Windows:
 
-1. **The VBIOS hash.** Apple's driver needs two tables (a PSP directory and `vram_info`) that a Rembrandt VBIOS
-   doesn't have. The kext reads the VBIOS from the ACPI `VFCT` table at boot, adds both tables, and only
-   accepts a VBIOS whose length and hash are in `vbios_augment.hpp`. Your laptop has another VBIOS, so it needs
-   other values.
-2. **The PCI IDs.** The register mapping accepts only the Lenovo GPU (subsystem `17AA:3B1E`, revision `03`).
+1. Right-click the Start button and open **Device Manager**.
+2. Open **Display adapters** and double-click the **AMD Radeon** entry.
+3. Go to the **Details** tab and choose **Hardware Ids** in the list. The first line looks like this:
+   ```
+   PCI\VEN_1002&DEV_1681&SUBSYS_3B1E17AA&REV_03
+   ```
+   - `DEV_1681` is the AMD Rembrandt GPU. **If your line doesn't have `VEN_1002&DEV_1681`, this project is not
+     for your computer. Stop here.**
+   - `SUBSYS_3B1E17AA` and `REV_03` identify your laptop's version of it. Write the whole line down.
+4. Open **Settings → System → About** and look at **Processor**. `DEV_1681` is used by two GPUs:
+   - **Radeon 660M**: Ryzen 5 6600U, 6600H, 6600HS, 7535U, 7535HS and similar. This is what the project is for.
+   - **Radeon 680M**: Ryzen 7 / Ryzen 9 6800U, 6800H, 6900HS, 7735U, 7735HS and similar. Same chip with twice the
+     compute units. It has never been tried with this kext.
 
-You will change those values and build. Nothing else in the source should need to change.
+Other AMD graphics (Vega, Radeon 780M and newer) are different chips and won't work with this kext.
 
-### Step 1: collect the GPU data in Linux
+### Step 2: BIOS settings
 
-Boot the Linux live USB and run:
+Open the BIOS setup. On Lenovo laptops press **F2** at power-on, or use the small Novo button and choose
+**BIOS Setup**. On other brands try Del, F2 or F10. Names differ between brands; look for these:
 
-```sh
-lspci -nnv -d 1002:1681 | head -3                     # note "(rev NN)" and "Subsystem: ... [vvvv:dddd]"
-sudo cat /sys/firmware/acpi/tables/VFCT > VFCT.bin   # the VBIOS, as the kext will read it
-sudo dmesg | grep -E "amdgpu.*(VRAM:|RAM width)"      # e.g. "VRAM: 2048M" and "RAM width 128bits"
-```
+| Setting | Set to | Why |
+|---|---|---|
+| **Secure Boot** | Disabled | OpenCore, the boot loader used below, isn't signed for Secure Boot |
+| **Boot mode** / **CSM** / **Legacy** | UEFI only, CSM off | OpenCore is a UEFI program |
+| **UMA Frame Buffer Size** (also called iGPU memory, VRAM or UMA size) | Suggested: 4 GB with 16 GB of RAM or more, 2 GB with 8 GB | This becomes the GPU memory in macOS. Both 2 GB and 4 GB have run on the 82TL |
 
-Copy `VFCT.bin` somewhere macOS can read it, and write down the subsystem, the revision, the VRAM size in MB and
-the RAM width in bits.
+Many laptops don't show a UMA option. Then leave it as it is. Save and exit (usually **F10**).
 
-The VRAM size is the **UMA frame buffer size** set in the BIOS. If you change it later, redo steps 2 and 4.
+Set these **before** step 3, so Linux reads the GPU with the settings you will use.
+
+### Step 3: Read the GPU data in Linux
+
+The kext needs a copy of your GPU's VBIOS and four values. macOS can't show them before the driver works, but
+Linux can, without installing anything.
+
+1. Download **Ubuntu Desktop** from [ubuntu.com/download/desktop](https://ubuntu.com/download/desktop).
+2. Write it to the 8 GB stick with [balenaEtcher](https://etcher.balena.io). This erases the stick.
+3. Restart the laptop and open the boot menu. On Lenovo laptops press **F12** at power-on, or use the Novo button
+   and choose **Boot Menu**. On other brands try F12, F11, F9 or Esc. Pick the USB stick.
+4. Choose **Try Ubuntu**, not Install. Ubuntu then runs from the stick and changes nothing on your disk. Connect
+   to Wi-Fi from the top-right corner.
+5. Plug in the second USB stick. Open a terminal with **Ctrl+Alt+T** and run these lines one at a time:
+   ```sh
+   cd ~
+   { lspci -nnv -d 1002:1681 | head -3; sudo dmesg | grep -E "ATOM BIOS|amdgpu.*(VRAM:|RAM width)"; } | tee gpu-info.txt
+   sudo cat /sys/firmware/acpi/tables/VFCT > VFCT.bin
+   ls -l VFCT.bin
+   ```
+   On the Lenovo 82TL it prints this (shortened, timestamps removed):
+   ```
+   04:00.0 VGA compatible controller [0300]: ... [1002:1681] (rev 03) ...
+           Subsystem: Lenovo ... [17aa:3b1e]
+   amdgpu 0000:04:00.0: [drm] ATOM BIOS: 113-REMBRANDT-X37
+   amdgpu 0000:04:00.0: VRAM: 2048M 0x000000F400000000 - 0x000000F47FFFFFFF (2048M used)
+   amdgpu 0000:04:00.0: [drm] RAM width 128bits LPDDR5
+   -rw-rw-r-- 1 ubuntu ubuntu 44676 ... VFCT.bin
+   ```
+   `lspci` may call the GPU "Radeon 680M". That's only a family name; `1002:1681` is what counts.
+
+   Write down four values: the **subsystem** (`17aa:3b1e` above), the **revision** (`03`), the **VRAM** in MB
+   (`2048`) and the **RAM width** in bits (`128`).
+   - `VFCT.bin: No such file or directory`: your firmware doesn't publish its VBIOS this way, and the kext can't
+     work. Stop and open an issue.
+   - No `amdgpu` lines: Linux didn't start its GPU driver. Try the newest Ubuntu.
+6. Still in the terminal, download this project and run its VBIOS tool with **your** VRAM and RAM width:
+   ```sh
+   wget https://github.com/rthh21/660m-Metal/archive/refs/heads/main.zip
+   python3 -m zipfile -e main.zip .
+   python3 660m-Metal-main/tools/port_vbios.py VFCT.bin --vram-mb <VRAM> --bus-width <RAM width> | tee -a gpu-info.txt
+   ```
+   It ends with five lines that start with `constexpr`. You need them in steps 4 and 7.
+7. Open the **Files** app, go to **Home**, and drag `gpu-info.txt` and `VFCT.bin` onto the second stick.
+   Eject it and shut down Ubuntu.
 
 > [!NOTE]
-> `VFCT.bin` contains your laptop vendor's VBIOS. Keep it out of any public repository.
+> `VFCT.bin` is your laptop maker's VBIOS. Keep it to yourself. Don't upload it anywhere, not even in an issue.
 
-### Step 2: compute the VBIOS values
+### Step 4: Ready-made kext or your own build?
 
-```sh
-python3 tools/port_vbios.py VFCT.bin --vram-mb 2048 --bus-width 128
-```
+The ready-made kext in [`dist/`](dist) contains the values of one VBIOS only: `113-REMBRANDT-X37`, from the BIOS
+of the Lenovo 82TL it was built on. At every boot it checks the VBIOS and the GPU's PCI IDs, and it does nothing
+on any other. That safety check is why most computers need their own build. Compare your `gpu-info.txt` with
+this table:
 
-Use your own values from step 1. The tool runs the same augmentation as the kext and prints five lines:
-
-```
-constexpr size_t kRawLen = 0x....;
-constexpr size_t kOutLen = 0x....;
-constexpr uint64_t kRawFnv = 0x................ULL;
-constexpr uint64_t kOutFnv = 0x................ULL;
-constexpr uint32_t kVramMb = ..., kBusWidth = ...;
-```
-
-Replace the matching five lines at the top of `src/Rembrandt660M/vbios_augment.hpp`. On the 82TL the tool prints
-exactly the values already there, which is how you can check the tool. If it stops with "master data table slot
-... is already used" or "over 64 KiB", your VBIOS is laid out differently and the augmentation must be adapted
-first. Open an issue with the tool's output.
-
-### Step 3: accept your GPU's PCI IDs
-
-```sh
-grep -n "0x3b1e\|0x3B1E" src/Rembrandt660M/mmio.cpp src/Rembrandt660M/kern_start.cpp
-```
-
-This finds three checks. Each compares the subsystem vendor (`0x17aa`), the subsystem ID (`0x3b1e`) and the
-revision (`3`). Change all three to your values from step 1:
-
-| Where | What it gates |
+| Value | Must be exactly |
 |---|---|
-| `mmio.cpp`, `lenovoGpu()` | Mapping the GPU registers. Without it the kext does nothing |
-| `mmio.cpp`, the VRAM lookup below it | Access to the VRAM aperture |
-| `kern_start.cpp`, `idOk` | Only the optional embedded fallback VBIOS (unused unless you build with `VBIOS_ROM=`) |
+| The `kRawLen` line | `constexpr size_t kRawLen = 0xAE00;` |
+| The `kRawFnv` line | `constexpr uint64_t kRawFnv = 0x45263ce37d8098a3ULL;` |
+| Subsystem (from `lspci`) | `17aa:3b1e` |
+| Revision (from `lspci`) | `03` |
 
-### Step 4: build
+- **All four match:** use the ready-made `dist/Rembrandt660M.kext` and skip step 7.
+- **Anything differs:** build your own kext in step 7. It takes about an hour, and nothing in it is hard.
 
-Follow [Building](#building). `make check` must print `RESULT: PASS`. No VBIOS file is embedded; the kext reads
-yours from ACPI at boot.
+This also applies to another Lenovo 82TL. A Lenovo BIOS update can change the VBIOS, and the ready-made kext
+then refuses it. **After every BIOS update, redo steps 3 and 4.**
 
-### Step 5: set up OpenCore
+The `kVramMb` line doesn't decide anything here. macOS uses the real size set in the BIOS: the 82TL runs a kext
+built with `kVramMb = 2048` with 4 GB set in the BIOS, and macOS shows 4 GB. Changing the UMA size didn't change
+the VBIOS on the 82TL either.
 
-Only the GPU-related parts are listed here; the rest is a normal AMD laptop EFI
-([Dortania guide](https://dortania.github.io/OpenCore-Install-Guide/)). The
-[EFI reference](#opencore-efi-reference-lenovo-82tl) shows the full 82TL setup.
+If the tool stopped with an error instead of printing the five lines:
 
-1. **Kernel → Add**: `Lilu.kext` first, **your** `Rembrandt660M.kext` directly after it, then `VirtualSMC.kext`
-   and the rest. Do not load `NootedRed` or any other Radeon kext next to it.
-2. **DeviceProperties → Add** on the GPU. Find its path with `gfxutil`; on Rembrandt it is usually
-   `PciRoot(0x0)/Pci(0x8,0x1)/Pci(0x0,0x0)`:
+| Error | Meaning |
+|---|---|
+| `no 1002:1681 image in the VFCT table` | The VFCT doesn't hold this GPU's VBIOS. The kext can't work |
+| `master data table slot ... is already used` or `augmented image is over 64 KiB` | Your VBIOS is laid out differently. The kext needs changes first: open an issue with `gpu-info.txt` |
+
+### Step 5: Get macOS 26.7 build 25G229
+
+The kext only works on macOS Tahoe **26.7, build 25G229**. It changes Apple's driver code at addresses that exist
+only in that exact build. Apple also offers newer versions (26.7.1 to 26.7.3 when this was written); the kext is
+not made for them.
+
+> [!WARNING]
+> The usual hackintosh method downloads macOS Recovery (`macrecovery.py`), and Recovery always installs the
+> **newest** version. Don't use it for your final install. You need the full 26.7 installer.
+
+**With a Mac**, open Terminal:
+
+1. Check that Apple still offers the build:
+   ```sh
+   softwareupdate --list-full-installers | grep 25G229
+   ```
+   It must print `* Title: macOS Tahoe, Version: 26.7, Size: 17951133KiB, Build: 25G229, ...`. If it prints
+   nothing, Apple has withdrawn it and the kext needs an update for a newer build: open an issue.
+2. Download it (about 18 GB). It appears as **Install macOS Tahoe** in Applications:
+   ```sh
+   softwareupdate --fetch-full-installer --full-installer-version 26.7
+   ```
+3. Plug in the 32 GB stick. Open **Disk Utility** and choose **View → Show All Devices**. Select the stick itself
+   (the top line, not the volume under it) and click **Erase**. Use name `MyVolume`, format
+   **Mac OS Extended (Journaled)** and scheme **GUID Partition Map**.
+4. Write the installer to the stick. It asks for your password, then for `Y`, and takes about 20 minutes:
+   ```sh
+   sudo "/Applications/Install macOS Tahoe.app/Contents/Resources/createinstallmedia" --volume /Volumes/MyVolume
+   ```
+
+**Without a Mac:** make a normal Tahoe installer from Windows with Dortania's
+[Making the installer in Windows](https://dortania.github.io/OpenCore-Install-Guide/installer-guide/windows-install.html).
+It installs the newest Tahoe, which is fine as a **temporary** system. Install it with step 6, then run the
+"With a Mac" steps inside it to make a 25G229 stick, and install again from that stick, erasing the disk.
+
+### Step 6: Install macOS without acceleration
+
+First you get macOS running **without** the GPU driver. The picture works, but everything is slow and animations
+stutter. That's expected; the GPU comes in step 8.
+
+Follow the [Dortania OpenCore Install Guide](https://dortania.github.io/OpenCore-Install-Guide/) from start to
+end. Where it asks you to choose, take the **AMD** pages (Ryzen, 17h and 19h). Use these choices, which are what
+runs on the 82TL:
+
+| Part | What to use |
+|---|---|
+| **OpenCore** | 1.0.8 RELEASE |
+| **Kexts** | `Lilu` 1.7.2 or newer, `VirtualSMC`, `AmdTscSync`, `RestrictEvents`, `AppleMCEReporterDisabler`, `USBToolBox` + `UTBDefault`, `VoodooPS2Controller` (keyboard), `VoodooI2C` + `VoodooI2CHID` (touchpad), `ECEnabler` + `SMCBatteryManager` (battery), `AMDRyzenCPUPowerManagement` + `SMCAMDProcessor`. Audio and Wi-Fi depend on your hardware. **No graphics kext**: no `NootedRed`, no `WhateverGreen` |
+| **ACPI** | `SSDT-EC`, `SSDT-USBX`, `SSDT-PLUG-ALT` and `SSDT-HPET`, made for your laptop with [SSDTTime](https://github.com/corpnewt/SSDTTime) as Dortania explains |
+| **config.plist** | Start from OpenCore's `Sample.plist` as Dortania says, then set what the [EFI reference](#opencore-efi-reference-lenovo-82tl) lists: quirks, the AMD kernel patches with **your** CPU core count, the extra kernel patches, `iMac20,1` with your own serials from [GenSMBIOS](https://github.com/corpnewt/GenSMBIOS), and the boot-args (without `-rmbumd` for now) |
+
+Then:
+
+1. Copy your `EFI` folder to the EFI partition of the installer stick, as Dortania shows.
+2. Boot from the stick (boot menu, step 3) and choose **Install macOS Tahoe**. In **Disk Utility** erase the
+   target disk or partition as **APFS**, then install. Erasing a whole disk deletes Windows on it: to keep
+   Windows, read Dortania's [Multiboot guide](https://dortania.github.io/OpenCore-Multiboot/) first. The laptop
+   restarts several times. Each time, pick the stick in the boot menu and the **macOS Installer** entry in
+   OpenCore, until the entry has your disk's name.
+3. After the setup assistant, turn off updates: **System Settings → General → Software Update**, click ⓘ next to
+   **Automatic updates** and turn everything off. **Never click "Update Now".**
+4. Check the build in Terminal. It must print `25G229`:
+   ```sh
+   sw_vers -buildVersion
+   ```
+5. Make the laptop boot without the stick: copy the `EFI` folder to the internal disk's EFI partition, as in
+   Dortania's [Moving OpenCore from USB to macOS drive](https://dortania.github.io/OpenCore-Post-Install/universal/oc2hdd.html).
+
+You now have a working, slow macOS. Keep this EFI as it is: it's your way back if step 8 goes wrong.
+
+### Step 7: Build the kext
+
+Skip this step if step 4 said the ready-made kext fits. Everything here runs in Terminal on the laptop, in macOS.
+
+1. **Install the Xcode Command Line Tools.** Run this and click **Install** in the window that opens:
+   ```sh
+   xcode-select --install
+   ```
+2. **Install the Kernel Debug Kit.** Go to [developer.apple.com/download/all](https://developer.apple.com/download/all/)
+   and sign in with your Apple ID. Search for **Kernel Debug Kit 26.7 build 25G229**, download the `.dmg`, open
+   it and run the `.pkg` inside. Check that it's installed:
+   ```sh
+   ls /Library/Developer/KDKs/
+   ```
+   It must list `KDK_26.7_25G229.kdk`.
+3. **Download the source and what it needs.** The GPU firmware comes from Linux's official firmware collection,
+   at the version the kext was checked against (tag `20261019`). `make firmware` refuses any other version:
+   ```sh
+   mkdir -p ~/rmb && cd ~/rmb
+   git clone https://github.com/rthh21/660m-Metal.git
+   cd 660m-Metal
+   git clone https://github.com/acidanthera/MacKernelSDK.git deps/MacKernelSDK
+   mkdir -p deps/yellow_carp_fw
+   for f in me pfp ce mec mec2 rlc sdma toc dmcub vcn; do
+     curl -fL -o deps/yellow_carp_fw/yellow_carp_$f.bin \
+       "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/amdgpu/yellow_carp_$f.bin?h=20261019"
+   done
+   ls -l deps/yellow_carp_fw
+   ```
+   The last command must list ten `yellow_carp_*.bin` files, none of them 0 bytes.
+4. **Put in your VBIOS values.** Plug in the stick with `gpu-info.txt` and open the file to edit:
+   ```sh
+   open -e src/Rembrandt660M/vbios_augment.hpp
+   ```
+   Near the top are five lines that start with `constexpr` (`kRawLen` to `kVramMb`). Replace them with the five
+   lines from your `gpu-info.txt`, save (**Cmd+S**) and close TextEdit.
+5. **Put in your PCI IDs.** In the first line, replace the three values with yours from step 3: lower case,
+   without `0x`, for example `SV=1043 SD=1e12 REV=c1` for subsystem `1043:1e12`, revision `c1`. Then run all
+   the lines:
+   ```sh
+   SV=<subsystem vendor> SD=<subsystem id> REV=<revision>
+   sed -i '' -e "s/0x17aa/0x$SV/g" -e "s/0x3b1e/0x$SD/g" \
+     -e "s/\"revision-id\") == 3/\"revision-id\") == 0x$REV/" \
+     -e "s/\"revision-id\") != 3/\"revision-id\") != 0x$REV/" src/Rembrandt660M/mmio.cpp
+   grep -n -E "subsystem-(vendor-)?id|revision-id" src/Rembrandt660M/mmio.cpp
+   ```
+   The `grep` shows the two checks that decide whether the kext touches the GPU. Both must now contain your three
+   values.
+6. **Build:**
+   ```sh
+   cd src/Rembrandt660M
+   export PATH="/Library/Developer/CommandLineTools/usr/bin:$PATH"
+   make firmware
+   make
+   make check
+   ```
+   `make check` must end with `RESULT: PASS`. Your kext is now `~/rmb/660m-Metal/src/Rembrandt660M/Rembrandt660M.kext`.
+   If a command stops with an error, open an issue and paste the whole output.
+
+### Step 8: Turn on acceleration
+
+Make the change on a **test stick** first. If something goes wrong, you take the stick out and the laptop boots
+as before.
+
+1. **Make a test stick.** In Disk Utility erase a USB stick as **MS-DOS (FAT)**, scheme **GUID Partition Map**.
+   Then mount the EFI partition you put OpenCore on in step 6.5. `diskutil list` shows it as the line with
+   type `EFI` under your internal disk, for example `disk0s1`:
+   ```sh
+   diskutil list
+   sudo diskutil mount <identifier, e.g. disk0s1>
+   ```
+   Copy the whole `EFI` folder from it to the stick.
+2. **Add the kext.** Copy `Rembrandt660M.kext` (yours from step 7, or `dist/Rembrandt660M.kext`) into
+   `EFI/OC/Kexts` **on the stick**.
+3. **Register it.** Open the stick's `EFI/OC/config.plist` in [ProperTree](https://github.com/corpnewt/ProperTree)
+   and use **File → OC Snapshot** on the stick's `OC` folder. In **Kernel → Add**, check that the new entry comes
+   **directly after Lilu** and that `Enabled` is `True`.
+4. **Find the GPU's path.** Download [gfxutil](https://github.com/acidanthera/gfxutil/releases) and unzip it. In
+   Terminal, drag the `gfxutil` file onto the window, type ` | grep -i 1002:1681` after it and press Enter. If
+   macOS blocks it, allow it in **System Settings → Privacy & Security** and run it again. Copy the part that
+   starts with `PciRoot`. On the 82TL it is `PciRoot(0x0)/Pci(0x8,0x1)/Pci(0x0,0x0)`.
+5. **Describe the GPU to macOS.** In ProperTree, under **DeviceProperties → Add**, add a child of type
+   Dictionary whose key is that path. Give it these children:
 
    | Key | Type | Value |
    |---|---|---|
    | `device-id` | Data | `FF730000` |
    | `compatible` | String | `pci1002,73ff` |
    | `model` | String | `AMD Radeon 660M` |
-   | `LoadAccelerator`, `LoadController`, `LoadHWServices` | Boolean | true |
+   | `LoadAccelerator`, `LoadController`, `LoadHWServices` | Boolean | True |
    | `CFG_USE_AGDC` | Data | `0000000000000000` |
    | `CFG_NO_BOOT_PWDN` | Data | `0100000000000000` |
    | `AAPL,iokit-ignore-ndrv` | Data | `01000000` |
 
-   Do not add `ATY,bin_image`: on 25G229 it never reaches the driver, which is why the kext builds the image
-   itself. Do not copy an `AAPL00,override-no-connect` from someone else's EFI; it is a panel's EDID.
-3. **PlatformInfo**: SMBIOS `iMac20,1` with your own serials.
-4. **NVRAM → boot-args**: `-lilubetaall -rmbumd -v keepsyms=1`. `-rmbumd` is required, without it Safari text
-   and icons are scrambled. Drop `-v` once everything works.
+   Don't add `ATY,bin_image`: on 25G229 it never reaches the driver, which is why the kext builds the image
+   itself. Don't copy an `AAPL00,override-no-connect` from someone else's EFI; it is their panel's EDID.
+6. **Turn on the UMD fix.** In **NVRAM → Add → 7C436110-AB2A-4BBB-A880-FE41995C9F82 → boot-args**, add
+   `-lilubetaall -rmbumd` to what is there. Keep `-v keepsyms=1` for now. Without `-rmbumd`, text and icons in
+   Safari are scrambled.
+7. Save the file. Restart, choose the test stick in the boot menu, then macOS in OpenCore.
 
-Boot from a USB stick with this EFI first. Keep your previous EFI on the internal disk until the stick works.
+If the boot hangs, hold the power button for 10 seconds, take the stick out and start again: the laptop boots
+from the internal disk as before. Then read [If something goes wrong](#if-something-goes-wrong).
 
-### Step 6: check the first boot
+### Step 9: Check the result
 
-The kext writes its log to `/private/var/log/rmb-msgbuf.log` (readable without sudo). After the boot:
+Open Terminal and run:
 
 ```sh
-grep -a "\[vbios\]" /private/var/log/rmb-msgbuf.log | tail -3
 system_profiler SPDisplaysDataType | grep -E "Chipset|VRAM|Metal"
+grep -a "\[vbios\]" /private/var/log/rmb-msgbuf.log | tail -3
 ```
 
-A good boot shows `ATY,bin_image set from ACPI VFCT (0x... bytes, fnv ...)` and `Metal: Supported`:
+On the 82TL with 4 GB set in the BIOS it prints:
+
+```
+      Chipset Model: AMD Radeon 660M
+      VRAM (Total): 4 GB
+      Metal Support: Metal 3
+```
+
+and a line `[vbios] ATY,bin_image set from ACPI VFCT (0xb600 bytes, fnv ...)`. Animations are now smooth.
+
+If it works, make it permanent. Mount the internal EFI partition (step 8.1) and copy its current `EFI` folder
+somewhere safe, for example your Documents folder. Then replace it with the `EFI` folder from the test stick.
+Keep the test stick: it boots the same system if the internal EFI ever breaks.
+
+### Step 10: After it works
+
+1. **Video decoding.** Let videos use the GPU. Run once; there is no sudo, and `defaults delete com.apple.AppleGVA`
+   undoes it:
+   ```sh
+   defaults write com.apple.AppleGVA gvaForceAMDAVCDecode -bool YES
+   defaults write com.apple.AppleGVA gvaForceAMDHEVCDecode -bool YES
+   ```
+2. **Sleep.** Sleep doesn't work with this kext. macOS still tries and ends up in a half-asleep state
+   (DarkWake), and waking from it once froze the 82TL with an external monitor connected. Turn the attempt off;
+   the screen still turns off when idle:
+   ```sh
+   sudo pmset -a sleep 0
+   ```
+3. Remove `-v` from boot-args once everything works.
+4. Read [Laptop-specific features](#laptop-specific-features) for the brightness slider, external monitors and
+   the GPU clock.
+5. **Never update macOS.** The kext is made for 25G229 only. If macOS updated anyway, add `-rem660off` to
+   boot-args (it turns the kext off) to get back in without acceleration. After a **BIOS** update, redo steps 3
+   and 4 before booting macOS.
+
+### If something goes wrong
+
+The kext writes its log to `/private/var/log/rmb-msgbuf.log` (readable without sudo).
 
 | What you see | Cause | What to do |
 |---|---|---|
-| `VFCT ... rejected (raw image is not the verified Lenovo VBIOS)` | Wrong values in `vbios_augment.hpp` | Redo step 2 with the `VFCT.bin` of this laptop and the same BIOS settings |
-| No `[vbios]` line, no acceleration | The PCI ID checks don't match | Redo step 3; compare with `lspci` |
-| Black screen or hang after the Apple logo | A display fix that doesn't fit your laptop | Boot with `-rem660off` (whole kext off) to get back in, then try the feature boot-args below one at a time |
-| Scrambled text and icons | `-rmbumd` missing | Add it to boot-args |
+| Black screen, or the boot hangs after the Apple logo | A display fix doesn't fit your laptop, or the kext is wrong | Take the test stick out and boot from the internal disk; you are back in the working system. Add `-rem660off` to the stick's boot-args: if that boots, the kext is the cause. Then try the feature boot-args ([Boot-args](#boot-args)) one at a time |
+| `VFCT ... rejected (raw image is not the verified Lenovo VBIOS)` in the log | The kext doesn't know this VBIOS: the ready-made kext on another laptop or BIOS, or wrong values in step 7.4 | Redo step 3 with the current BIOS settings, then step 7 |
+| No `[vbios]` lines in the log, macOS still slow | The kext didn't load, or the PCI ID checks don't match | `kmutil showloaded \| grep -i rembrandt` must list it. Check the order in **Kernel → Add** (directly after Lilu), then step 7.5 |
+| Scrambled text and icons | `-rmbumd` is missing | Add it to boot-args |
 | Panel stays at 60 Hz | EDID problem | `grep -a edidfix /private/var/log/rmb-msgbuf.log` |
+| The laptop froze and you had to force it off | Unknown | Boot again and open an issue saying what you were doing. A kext you built yourself (step 7) saves the last ~2 minutes before the freeze to `/private/var/log/rmb-msgbuf.prev.log` at the next boot; attach it. The kext in `dist/` doesn't save it yet: copy `rmb-msgbuf.log` right away instead |
 
-When you ask for help, attach `rmb-msgbuf.log` and the output of the commands above.
+To ask for help, open an issue with `gpu-info.txt`, `rmb-msgbuf.log` and what you did. **Never attach
+`VFCT.bin`.**
 
-### Step 7: laptop-specific features
+### Laptop-specific features
 
 | Part | On your laptop |
 |---|---|
 | Internal panel (eDP, link 0) | Generic, should work. `edidfix` only acts when an EDID block has a bad checksum |
-| Hardware video decode | Generic. Run the two `defaults write` commands from [Hardware video decode](#hardware-video-decode) once |
-| External displays (`extbind`) | DisplayPort over USB-C by default; hot plug on the first USB-C DP port. For a native HDMI port add `-rmbextbindhdmi` (untested) |
+| Hardware video decode | Generic. Run the two commands from [step 10](#step-10-after-it-works) once |
+| External displays (`extbind`) | DisplayPort over USB-C by default; hot plug on the first USB-C DP port. For a native HDMI port add `-rmbextbindhdmi` (untested). See [External display](#external-display-through-a-usb-c-hub) |
 | GPU clock (`gfxclk`) | The `auto` table was measured on the 82TL's 6600HS. If the GPU hangs under load, write `pmfw cap=1600` to `/Users/Shared/rmb-gfxclk.ctl`, or boot with `-rmbnogfxclk` |
 | `wlanfix` | Only acts on an MT7922 Wi-Fi card (`14c3:0616`). `-rmbnowlanfix` turns it off |
 | `xhciintr` | Fixes cursor stutter with Apple's xHCI driver on a single MSI. `-rmbxhciintr1` turns it off |
@@ -239,18 +476,14 @@ no entry. `dist/RmbPanel660M.kext` is a codeless kext (only an `Info.plist`) tha
 3. Add the kext to `Kernel → Add` (no executable, `PlistPath` = `Contents/Info.plist`) together with an
    `SSDT-PNLF` for AMD.
 
----
+### Known problems
 
-## Install on the Lenovo 82TL
-
-The kext in `dist/` works on this laptop as it is.
-
-1. Install **macOS 26.7 build 25G229** and turn off automatic updates.
-2. Build an OpenCore EFI as shown in the [EFI reference](#opencore-efi-reference-lenovo-82tl), with
-   `dist/Rembrandt660M.kext` and `dist/RmbPanel660M.kext`.
-3. For hardware video decode, run the two `defaults write com.apple.AppleGVA` commands from
-   [Hardware video decode](#hardware-video-decode) once.
-4. Boot from a USB stick first and switch to the internal EFI only once that works.
+- **Sleep** doesn't work. Use `pmset -a sleep 0` ([step 10](#step-10-after-it-works)).
+- **Freezes with an external monitor.** The 82TL froze hard twice on 2026-11-12 with a monitor on the USB-C hub:
+  once in normal use (the screens turned green and black), once right after the screens woke up. The cause isn't
+  known yet. After such a freeze the external display stays off on purpose; see the crash guard in
+  [External display](#external-display-through-a-usb-c-hub).
+- **Tested on one laptop only.** Every other computer is untested.
 
 ---
 
@@ -449,6 +682,8 @@ OpenCore ──► Lilu ──► Rembrandt660M.kext
 | `-rmbvcn` | Keep the video properties even when the VCN crash guard turned VCN off (diagnostic only) |
 | `-rmbretimer` | Fixed VS/PE retimer emulation (for hardware with an LTTPR, not the 82TL) |
 | `-rmbusbc4lane` | Ask for 4 DP lanes on USB-C (the 82TL hub only has 2) |
+| `-rmbnoblramp` | Turn off the backlight smoother (brightness moves in steps again) |
+| `rmbblramp=<ms>` | Time constant of the backlight smoother, default 50, at most 2000; `0` turns it off |
 
 ---
 
@@ -459,7 +694,7 @@ OpenCore ──► Lilu ──► Rembrandt660M.kext
 | Xcode Command Line Tools | `xcode-select --install` | |
 | [MacKernelSDK](https://github.com/acidanthera/MacKernelSDK) | `git clone` | `deps/MacKernelSDK` |
 | Kernel Debug Kit 26.7 **25G229** | [developer.apple.com/download](https://developer.apple.com/download/all/) (free Apple account) | `/Library/Developer/KDKs/KDK_26.7_25G229.kdk` |
-| Rembrandt GPU firmware | [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git), `amdgpu/yellow_carp_*.bin`, decompressed into one folder | `deps/yellow_carp_fw` |
+| Rembrandt GPU firmware | [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git) tag `20261019`, `amdgpu/yellow_carp_*.bin`, uncompressed, in one folder ([step 7.3](#step-7-build-the-kext) has the commands). `make firmware` accepts only the hashes in `audit/firmware_local_sha256.json` | `deps/yellow_carp_fw` |
 | Lilu 1.7.3 headers and runtime | Already in `build/` | |
 
 With the inputs at their default locations:
@@ -485,25 +720,33 @@ for f in tests/test_*.py; do python3 "$f"; done
 ## OpenCore EFI reference (Lenovo 82TL)
 
 The full setup of the 82TL, for reference. On another laptop take only the GPU parts
-([step 5](#step-5-set-up-opencore)) and build the rest for your hardware.
+([step 8](#step-8-turn-on-acceleration)) and build the rest for your hardware.
 
 Start from a standard AMD laptop OpenCore EFI (Dortania guide, OpenCore 1.0.x) and set the following.
 
 **Kernel → Add**, in this order at the top:
 
-1. `Lilu.kext` (1.7.3 or newer)
+1. `Lilu.kext` (1.7.2 or newer; the 82TL runs 1.7.2)
 2. `dist/Rembrandt660M.kext`, **directly after Lilu**
 3. `VirtualSMC.kext`, then the rest, including `dist/RmbPanel660M.kext` (brightness slider, codeless)
 
 Everything else is ordinary laptop support and has nothing to do with the GPU: `AmdTscSync`, `RestrictEvents`,
-`AppleMCEReporterDisabler`, a USB map (`USBToolBox` + `UTBMap`), `VoodooPS2Controller` (keyboard only),
+`AppleMCEReporterDisabler`, `USBToolBox` + `UTBDefault`, `VoodooPS2Controller` (keyboard only),
 `VoodooI2C` + `VoodooI2CHID` (touchpad), `ECEnabler` + `SMCBatteryManager`, `AMDRyzenCPUPowerManagement` +
 `SMCAMDProcessor`, `AppleALC` (or `SimpleHDA`), `YogaSMC`, and MT7922 Wi-Fi/Bluetooth kexts. Do not load
 `NootedRed` or any other Radeon kext next to this one.
 
 **Kernel → Patch.** The AMD Vanilla patches (`AMD_Vanilla`) with the 6600HS core count (6) in the four
-`cpuid_cores_per_package` patches. On 26.x also add the non-monotonic time panic patches for
-`thread_invoke`/`thread_dispatch` that match your kernel version.
+`cpuid_cores_per_package` patches. After them, four more, all with `Identifier` = `kernel`, `Arch` = `x86_64`
+and an empty `Base`. The first three are the usual non-monotonic time patches for AMD; the last one is for this
+kernel only:
+
+| Comment | Find | Replace | Mask | ReplaceMask | Count | MinKernel | MaxKernel |
+|---|---|---|---|---|---|---|---|
+| thread_quantum_expire, thread_unblock, thread_invoke (Visual) | `48000000020000480000580000000F0000000000` | `0000000000000000000000000000669066906690` | `FF00000FFFFFFFFF0000FF000000FF0000000000` | `0000000000000000000000000000FFFFFFFFFFFF` | 3 | 21.0.0 | 25.99.99 |
+| thread_invoke, thread_dispatch, up to 26.3 (Visual) | `480000800400000F0000000000` | `00000000000000669066906690` | `480000F0FFFFFFFF0000000000` | `00000000000000FFFFFFFFFFFF` | 2 | 21.0.0 | 25.3.99 |
+| thread_invoke, thread_dispatch, 26.4 and newer (laobamac) | `480000900400000F0000000000` | `00000000000000669066906690` | `480000F0FFFFFFFF0000000000` | `00000000000000FFFFFFFFFFFF` | 2 | 25.4.0 | 25.99.99 |
+| fq_codel dequeue, 25G229 kernel only (rmb): `now < pkt_enq_time` counts as zero delay instead of a panic | `4D89C14929C97274488B46200FB6` | `4D89C14929C97252488B46200FB6` | | | 1 | 25.0.0 | 25.99.99 |
 
 **Kernel → Quirks.** `ProvideCurrentCpuInfo`, `DisableIoMapper`, `DisableLinkeditJettison`,
 `PowerTimeoutKernelPanic`, `DisableRtcChecksum`. **Kernel → Emulate:** `DummyPowerManagement`.
@@ -543,7 +786,9 @@ queries (it sets `OSTY` and renames `_REG` to `XREG`).
 `CustomSMBIOSGuid` (so Windows on the same disk is not affected).
 
 **NVRAM → boot-args.** `-lilubetaall -rmbumd alcid=101 revblock=cpum`, plus `-v keepsyms=1` for the first
-boots. `-rmbumd` is required: without it Safari text and icons are scrambled.
+boots. `-rmbumd` is required: without it Safari text and icons are scrambled. The 82TL actually boots with
+`keepsyms=1 debug=0x100 npci=0x3000 -lilubetaall -no_compat_check revblock=cpum dk=0 -rmbdbg alcid=101 -rmbumd`;
+of these only `-lilubetaall` and `-rmbumd` concern the GPU.
 
 **UEFI → Drivers.** `OpenRuntime.efi`, `HfsPlus.efi`, `ResetNvramEntry.efi` (and `OpenCanopy.efi` for a
 graphical picker).
