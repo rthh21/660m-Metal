@@ -13,6 +13,7 @@
 #include <IOKit/IOService.h>
 #include <kern/thread.h>
 #include <libkern/OSAtomic.h>
+#include <pexpert/pexpert.h>
 
 namespace {
 
@@ -912,6 +913,10 @@ void setBacklight(uint32_t level) {
 			bits, n);
 }
 
+// Backlight smoother (defined next to the panel curve, after setAttrImpl).
+bool blRampSet(uint32_t bklt);
+void blRampSync(uint32_t level);
+
 static bool anyOtgOn() {
 	bool on = false;
 	for (uint32_t i = 0; i < 4; i++)
@@ -1224,6 +1229,7 @@ uint32_t dropPowerGating(uint32_t old, uint32_t newWptr) {
 					LOG("bl: passed ABM sub %x at [%x] (firmware owns the PWM)", (hdr >> 8) & 0xFF, s);
 			} else if (!gKeepAbm && (hdr & 0xFFFF) == 0x0242) {
 				vramWrite32(ring + s, hdr & ~0xFFFFu);
+				blRampSync(vramRead64(ring + s + 8) & 0xFFFFFFFF);
 				setBacklight(vramRead64(ring + s + 8) & 0xFFFFFFFF);
 				if (sendLatePllPd(ring, s))
 					real++;
@@ -3817,7 +3823,8 @@ IOReturn setAttrImpl(IOService *fb, int32_t conn, uint32_t attr, uintptr_t value
 		static uint32_t logged;
 		if (logged++ < 40)
 			LOG("bl: bklt set %lu", value);
-		setBacklight(static_cast<uint32_t>((uint64_t)v * 0x10000 / BkltMax));
+		if (!blRampSet(v))
+			setBacklight(static_cast<uint32_t>((uint64_t)v * 0x10000 / BkltMax));
 		return kIOReturnSuccess;
 	}
 	if (attr == AttrBrgt && conn == 0 && isPanelFb(fb)) {
@@ -3825,6 +3832,7 @@ IOReturn setAttrImpl(IOService *fb, int32_t conn, uint32_t attr, uintptr_t value
 		static uint32_t logged;
 		if (logged++ < 40)
 			LOG("bl: brgt set %lu", value);
+		blRampSync(static_cast<uint32_t>((uint64_t)gBrgt * 0x10000 / BrgtMax));
 		setBacklight(static_cast<uint32_t>((uint64_t)gBrgt * 0x10000 / BrgtMax));
 		return kIOReturnSuccess;
 	}
@@ -3889,6 +3897,142 @@ bool wrapPanelSetDisplay(IOService *panel, IOService *display) {
 	bool r = reinterpret_cast<PanelSetDisplayFn>(orgPanelSetDisplay)(panel, display);
 	LOG("bl: AppleIntelPanel::setDisplay %s = %d", key[0] ? key : "(no DisplayProductID)", r);
 	return r;
+}
+
+// Backlight smoother (2026-11-12, user: "sliderul de luminozitate ... topaie putin. fa-l fluid").
+// corebrightnessd turns each F5/F6 press (1/16 of the range) into 10 'bklt' sub-steps but sends them
+// back to back, ~0.5 ms apart (unified log 11:26:51, BezelServices BrightnessDecrease_Down), so BL_PWM
+// took every 1/16 step at once. Like WhateverGreen's IGFX backlight smoother: 'bklt' only moves the
+// target, and a thread walks BL_PWM there every BlRampTickMs over gBlRampMs, from wherever it is,
+// linearly along the panel curve (the F10T0aa8 points above: ~perceptual, roughly geometric in duty).
+// A new target mid-ramp restarts from the current position, so held keys and slider drags glide.
+// Only while the CPU owns PWRSEQ0 (BL_PWM_PERIOD readable); otherwise, and for the first set after
+// boot, the old direct write (with its revive / firmware path). DAL's ABM SET_BACKLIGHT and 'brgt'
+// writes cancel the ramp (blRampSync). Lock order: gInboxLock -> gBlRampLock; the thread never calls
+// setBacklight with gBlRampLock held. rmbblramp=<ms> (default 50, 0 = off), -rmbnoblramp = off.
+// v2 (2026-11-12, user: "merge cu intarziere / sacadat"): the linear 200 ms ramp restarted at every
+// 'bklt' set, so held F5/F6 trailed about one step behind and each restart changed speed. Now an
+// exponential follower in curve position: each tick moves gBlRampK/1024 of the remaining distance
+// (time constant gBlRampMs), so a change starts on the next tick and eases out (~86 % after 2 tau),
+// and at least BlRampMinStep per tick so the tail ends (one step: ~25 ticks at tau 50 ms).
+constexpr uint32_t BlRampTickMs = 8, BlRampSeg = 4096, BlRampMinStep = 32;
+uint32_t gBlRampMs = 50;
+uint32_t gBlRampK = 1024;  // set from gBlRampMs at start: 1024 * (1 - exp(-tick / tau))
+IOLock *gBlRampLock;
+struct BlRamp {
+	bool active, thread;
+	uint32_t pos, to;      // curve positions (segment i = [i, i + 1] * BlRampSeg)
+	uint32_t target, last; // 'bklt' units; last = ~0u until the first set
+	uint32_t ticks, logged;
+} gRamp {false, false, 0, 0, 0, ~0u, 0, 0};
+
+uint32_t blCurve(size_t i) {
+	constexpr size_t n = arrsize(kPanelCurve);
+	return kPanelCurve[i] * BkltMax / kPanelCurve[n - 1];
+}
+
+uint32_t blToPos(uint32_t v) {
+	constexpr size_t n = arrsize(kPanelCurve);
+	for (size_t i = 0; i + 1 < n; i++) {
+		uint32_t a = blCurve(i), b = blCurve(i + 1);
+		if (v <= b)
+			return static_cast<uint32_t>(i * BlRampSeg + (v > a && b > a ? (uint64_t)(v - a) * BlRampSeg / (b - a) : 0));
+	}
+	return static_cast<uint32_t>((n - 1) * BlRampSeg);
+}
+
+uint32_t blFromPos(uint32_t p) {
+	constexpr size_t n = arrsize(kPanelCurve);
+	size_t i = p / BlRampSeg;
+	if (i >= n - 1)
+		return blCurve(n - 1);
+	uint32_t a = blCurve(i), b = blCurve(i + 1);
+	return a + static_cast<uint32_t>((uint64_t)(b - a) * (p % BlRampSeg) / BlRampSeg);
+}
+
+uint32_t blLevel(uint32_t v) { return static_cast<uint32_t>((uint64_t)v * 0x10000 / BkltMax); }
+
+void blRampThread(void *, wait_result_t) {
+	IOLockLock(gBlRampLock);
+	for (;;) {
+		while (!gRamp.active)
+			IOLockSleep(gBlRampLock, &gRamp, THREAD_UNINT);
+		int64_t d = (int64_t)gRamp.to - (int64_t)gRamp.pos, ad = d < 0 ? -d : d;
+		int64_t step = ad * gBlRampK / 1024;
+		if (step < BlRampMinStep)
+			step = ad < BlRampMinStep ? ad : BlRampMinStep;
+		gRamp.pos = static_cast<uint32_t>((int64_t)gRamp.pos + (d < 0 ? -step : step));
+		bool done = gRamp.pos == gRamp.to || !cpuOwnsPwm();
+		uint32_t v = done ? gRamp.target : blFromPos(gRamp.pos);
+		gRamp.ticks++;
+		if (done) {
+			gRamp.active = false;
+			if (gRamp.logged < 60)
+				LOG("bl: ramp done at %u after %u ticks%s", v, gRamp.ticks, cpuOwnsPwm() ? "" : " (PWRSEQ0 not CPU-owned)");
+		}
+		bool write = v != gRamp.last;
+		gRamp.last = v;
+		IOLockUnlock(gBlRampLock);
+		if (write)
+			setBacklight(blLevel(v));
+		if (!done)
+			IOSleep(BlRampTickMs);
+		IOLockLock(gBlRampLock);
+	}
+}
+
+// 'bklt' set from AppleIntelPanelA. false = not ramped, the caller writes the PWM itself.
+bool blRampSet(uint32_t v) {
+	if (!gBlRampMs || !gBlRampLock)
+		return false;
+	bool owned = cpuOwnsPwm();
+	IOLockLock(gBlRampLock);
+	if (!owned || gRamp.last == ~0u) {
+		gRamp.active = false;
+		gRamp.last = v;
+		IOLockUnlock(gBlRampLock);
+		return false;
+	}
+	if (!gRamp.thread) {
+		thread_t t;
+		if (kernel_thread_start(blRampThread, nullptr, &t) != KERN_SUCCESS) {
+			gRamp.last = v;
+			IOLockUnlock(gBlRampLock);
+			LOG("bl: backlight smoother thread failed to start, direct writes");
+			return false;
+		}
+		thread_deallocate(t);
+		gRamp.thread = true;
+	}
+	if (!gRamp.active && v == gRamp.last) {
+		IOLockUnlock(gBlRampLock);
+		return true;
+	}
+	if (!gRamp.active) {
+		// idle: start from the level last written; mid-ramp: keep going from where it is
+		gRamp.pos = blToPos(gRamp.last);
+		gRamp.ticks = 0;
+		if (gRamp.logged < 60) {
+			gRamp.logged++;
+			LOG("bl: ramp %u -> %u (tau %u ms)", gRamp.last, v, gBlRampMs);
+		}
+	}
+	gRamp.to = blToPos(v);
+	gRamp.target = v;
+	gRamp.active = true;
+	IOLockWakeup(gBlRampLock, &gRamp, true);
+	IOLockUnlock(gBlRampLock);
+	return true;
+}
+
+// Someone else wrote the PWM (level = u16.16 duty): stop the ramp and start the next one from there.
+void blRampSync(uint32_t level) {
+	if (!gBlRampLock)
+		return;
+	IOLockLock(gBlRampLock);
+	gRamp.active = false;
+	gRamp.last = static_cast<uint32_t>((uint64_t)(level > 0x10000 ? 0x10000 : level) * BkltMax / 0x10000);
+	IOLockUnlock(gBlRampLock);
 }
 
 // extreplay (2026-11-11, Lenovo 82TL + USB-C hub "USB Type-C Digital AV Adapter", DP alt -> HDMI PCON):
@@ -4434,6 +4578,21 @@ void displayRoute(KernelPatcher &patcher, size_t index, mach_vm_address_t addres
 	gFwAbmSet = checkKernelArgument("-rmbfwabmset");
 	if (!gInboxLock)
 		gInboxLock = IOLockAlloc();
+	{
+		uint32_t ms = 0;
+		if (PE_parse_boot_argn("rmbblramp", &ms, sizeof(ms)))
+			gBlRampMs = ms > 2000 ? 2000 : ms;
+		if (checkKernelArgument("-rmbnoblramp"))
+			gBlRampMs = 0;
+		if (gBlRampMs && !gBlRampLock)
+			gBlRampLock = IOLockAlloc();
+		// 1 - exp(-x) ~ x / (1 + x / 2), x = tick / tau
+		gBlRampK = gBlRampMs ? 1024 * BlRampTickMs / (gBlRampMs + BlRampTickMs / 2) : 1024;
+		if (gBlRampK > 1024)
+			gBlRampK = 1024;
+		LOG("bl: backlight smoother ease-out tau %u ms, tick %u ms, %u/1024 per tick (rmbblramp=<ms>, -rmbnoblramp)", gBlRampMs,
+		    BlRampTickMs, gBlRampK);
+	}
 	gNoColdPg = checkKernelArgument("-rmbnocoldpg");
 	gKeepPhyWrites = checkKernelArgument("-rmbphywr");
 	gUsbcLog = !checkKernelArgument("-rmbnousbclog");
