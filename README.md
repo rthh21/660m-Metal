@@ -12,6 +12,10 @@
 ![Lilu](https://img.shields.io/badge/Lilu-plugin-8A2BE2)
 ![License](https://img.shields.io/badge/license-GPL--2.0-lightgrey)
 
+[![Stars](https://img.shields.io/github/stars/rthh21/660m-Metal?style=for-the-badge&logo=github&label=stars&color=f5c518&labelColor=1f2328)](https://github.com/rthh21/660m-Metal/stargazers)
+[![Forks](https://img.shields.io/github/forks/rthh21/660m-Metal?style=for-the-badge&logo=github&color=8A2BE2&labelColor=1f2328)](https://github.com/rthh21/660m-Metal/forks)
+[![Last commit](https://img.shields.io/github/last-commit/rthh21/660m-Metal?style=for-the-badge&logo=git&logoColor=white&color=2ea44f&labelColor=1f2328)](https://github.com/rthh21/660m-Metal/commits/main)
+
 *Apple never shipped a driver for AMD Rembrandt. This project makes Apple's own Navi 23 driver stack run on it.*
 
 </div>
@@ -30,6 +34,7 @@
 [Boot-args](#boot-args) ·
 [Building](#building) ·
 [EFI reference](#opencore-efi-reference-lenovo-82tl) ·
+[Star history](#star-history) ·
 [License](#license)
 
 ## What this is
@@ -556,6 +561,24 @@ graphical picker).
 | [`tools/`](tools) | `port_vbios.py` (VBIOS values for another laptop), manifest and import verifiers, Metal and GPU-clock probes (`tools/gfxcheck`, `tools/metal`, `tools/metaltest`), VideoToolbox decode probe (`tools/vtdecode`) |
 | [`scripts/`](scripts) | `fw-extract.py` (splits the linux-firmware images for the build) |
 | [`audit/`](audit) | Import audit result (`import_authority.json`, `undefined_symbols.txt`) and firmware hashes |
+
+---
+
+## Star history
+
+<div align="center">
+
+<a href="https://www.star-history.com/#rthh21/660m-Metal&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=rthh21/660m-Metal&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=rthh21/660m-Metal&type=Date" />
+    <img alt="Star history of rthh21/660m-Metal" src="https://api.star-history.com/svg?repos=rthh21/660m-Metal&type=Date" width="720" />
+  </picture>
+</a>
+
+⭐ *If this got macOS running on your 660M, a star helps other Rembrandt owners find it.* ⭐
+
+</div>
 
 ---
 
