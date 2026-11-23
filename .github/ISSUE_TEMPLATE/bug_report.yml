@@ -1,0 +1,57 @@
+name: Problem report
+description: Something doesn't work, froze, or behaves differently than the README says.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please run `doctor.command` first (README, "If something goes wrong"): it checks the
+        install and saves `660m-doctor-<date>.zip` on the Desktop with private data masked. Attach that zip below.
+  - type: input
+    id: laptop
+    attributes:
+      label: Laptop model
+      description: Maker, model and machine type, for example "Lenovo 82TL".
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: macOS build
+      description: Output of `sw_vers -buildVersion`. Only 25G229 is supported.
+      placeholder: 25G229
+    validations:
+      required: true
+  - type: dropdown
+    id: kext
+    attributes:
+      label: Kext
+      options:
+        - Ready-made kext from dist/ or a release
+        - My own build (step 7)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Kext version
+      description: Output of `kextstat | grep -i rembrandt` (the number in parentheses).
+      placeholder: "1.1.0"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. Say whether an external monitor was connected and whether the laptop had just woken from sleep.
+    validations:
+      required: true
+  - type: textarea
+    id: bootargs
+    attributes:
+      label: boot-args
+      description: Output of `nvram boot-args`.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Doctor zip and logs
+      description: Drag `660m-doctor-<date>.zip` here. After a freeze, also attach `/private/var/log/rmb-msgbuf.prev.log`.

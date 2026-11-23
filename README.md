@@ -15,10 +15,22 @@
 [![Stars](https://img.shields.io/github/stars/rthh21/660m-Metal?style=for-the-badge&logo=github&label=stars&color=f5c518&labelColor=1f2328)](https://github.com/rthh21/660m-Metal/stargazers)
 [![Forks](https://img.shields.io/github/forks/rthh21/660m-Metal?style=for-the-badge&logo=github&color=8A2BE2&labelColor=1f2328)](https://github.com/rthh21/660m-Metal/forks)
 [![Last commit](https://img.shields.io/github/last-commit/rthh21/660m-Metal?style=for-the-badge&logo=git&logoColor=white&color=2ea44f&labelColor=1f2328)](https://github.com/rthh21/660m-Metal/commits/main)
+[![Release](https://img.shields.io/github/v/release/rthh21/660m-Metal?style=for-the-badge&logo=github&label=release&color=0969da&labelColor=1f2328)](https://github.com/rthh21/660m-Metal/releases/latest)
+[![Tests](https://img.shields.io/github/actions/workflow/status/rthh21/660m-Metal/tests.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=tests&labelColor=1f2328)](https://github.com/rthh21/660m-Metal/actions/workflows/tests.yml)
 
 *Apple never shipped a driver for AMD Rembrandt. This project makes Apple's own Navi 23 driver stack run on it.*
 
+**[Download the latest release](https://github.com/rthh21/660m-Metal/releases/latest)** ·
+[Install guide](#install-guide-step-by-step) ·
+[Changelog](CHANGELOG.md) ·
+[Report a problem](https://github.com/rthh21/660m-Metal/issues/new/choose)
+
 </div>
+
+> [!NOTE]
+> **New in 1.1.0:** experimental [S3 sleep](#sleep-s3) with GPU power-down and resume, the panel stays at
+> 120 Hz after a wake, and the ready-made kext in `dist/` is rebuilt from the current source. See the
+> [changelog](CHANGELOG.md).
 
 ---
 
@@ -29,6 +41,7 @@
 [External display](#external-display-through-a-usb-c-hub) ·
 [GPU clock](#gpu-clock) ·
 [Video decode](#hardware-video-decode) ·
+[Sleep (S3)](#sleep-s3) ·
 [How it works](#how-it-works) ·
 [Boot-args](#boot-args) ·
 [Building](#building) ·
@@ -56,7 +69,7 @@ This repository holds only the graphics implementation, not a full EFI.
 | Feature | Status | Notes |
 |---|:-:|---|
 | **Metal / GPU acceleration** | Works | Every Metal, OpenCL, OpenGL, MPS and ray-tracing path tested passes |
-| **Internal panel 3072×1920 @ 120 Hz** | Works | Bad EDID DisplayID block repaired over AUX (`edidfix`), timing generator fix (`tgfix`), display clock raised to the 785 MHz pixel rate (before, "120 Hz" really refreshed at 72 Hz) |
+| **Internal panel 3072×1920 @ 120 Hz** | Works | Bad EDID DisplayID block repaired over AUX (`edidfix`), timing generator fix (`tgfix`), display clock raised to the 785 MHz pixel rate (before, "120 Hz" really refreshed at 72 Hz), and voted again after a sleep |
 | **Brightness slider + F5/F6 keys** | Works | Slider with `dist/RmbPanel660M.kext`; keys with `SSDT-BRTKEY` (Lenovo EC, see the [EFI reference](#opencore-efi-reference-lenovo-82tl)) |
 | **External monitor through a USB-C hub** | Works | DP alt mode → HDMI, 1920×1080 @ 120 Hz extended, plugged at boot or later (see [below](#external-display-through-a-usb-c-hub)) |
 | **Safari / text and icon rendering** | Works | AMD UMD `pipeBankXor` forced to 0 (`umdpatch`, `-rmbumd`) |
@@ -65,7 +78,7 @@ This repository holds only the graphics implementation, not a full EFI.
 | **Hardware video decode (VCN)** | Works | H.264 and HEVC (8 and 10 bit) up to 4K on VCN 3.1, Safari playback with 0 frames dropped. Encode stays in software, VP9 and AV1 are not available (see [below](#hardware-video-decode)) |
 | **GPU and memory clock** | Works | `gfxclk` keeps the GPU clock under the PMFW current limiter's trip point and raises FCLK to 1600 MHz while the GPU is busy (see [below](#gpu-clock)) |
 | **VRAM** | Partial | Carve-out of the BIOS UMA size (2 GB and 4 GB run on the 82TL) |
-| **Sleep** | No | The laptop only reaches DarkWake, not S3 |
+| **Sleep (S3)** | Experimental | Real S3 with GPU power-down and resume; needs two SSDTs. Wake by keyboard or power button not confirmed yet (see [below](#sleep-s3)) |
 
 The kext also carries two small non-graphics helpers that the same boot depends on: the xHCI interrupter fix
 above and `wlanfix` (turns off 10-bit tags on the root port of an MT7922 Wi-Fi card before macOS first reads it).
@@ -444,9 +457,9 @@ Keep the test stick: it boots the same system if the internal EFI ever breaks.
    defaults write com.apple.AppleGVA gvaForceAMDAVCDecode -bool YES
    defaults write com.apple.AppleGVA gvaForceAMDHEVCDecode -bool YES
    ```
-2. **Sleep.** Sleep doesn't work with this kext. macOS still tries and ends up in a half-asleep state
-   (DarkWake), and waking from it once froze the 82TL with an external monitor connected. Turn the attempt off;
-   the screen still turns off when idle:
+2. **Sleep.** Leave it off unless you set up [Sleep (S3)](#sleep-s3). Without the SSDTs from that section
+   macOS only reaches a half-asleep state (DarkWake), and waking from it once froze the 82TL with an external
+   monitor connected. Turn the attempt off; the screen still turns off when idle:
    ```sh
    sudo pmset -a sleep 0
    ```
@@ -468,7 +481,7 @@ The kext writes its log to `/private/var/log/rmb-msgbuf.log` (readable without s
 | No `[vbios]` lines in the log, macOS still slow | The kext didn't load, or the PCI ID checks don't match | `kmutil showloaded \| grep -i rembrandt` must list it. Check the order in **Kernel → Add** (directly after Lilu), then step 7.5 |
 | Scrambled text and icons | `-rmbumd` is missing | Add it to boot-args |
 | Panel stays at 60 Hz | EDID problem | `grep -a edidfix /private/var/log/rmb-msgbuf.log` |
-| The laptop froze and you had to force it off | Unknown | Boot again and open an issue saying what you were doing. A kext you built yourself (step 7) saves the last ~2 minutes before the freeze to `/private/var/log/rmb-msgbuf.prev.log` at the next boot; attach it. The kext in `dist/` doesn't save it yet: copy `rmb-msgbuf.log` right away instead |
+| The laptop froze and you had to force it off | Unknown | Boot again and open an issue saying what you were doing. The kext saves the last ~2 minutes before the freeze to `/private/var/log/rmb-msgbuf.prev.log` at the next boot; attach it |
 
 **To ask for help**, run the doctor in Terminal (in the downloaded folder, as in step 8):
 
@@ -510,7 +523,11 @@ no entry. `dist/RmbPanel660M.kext` is a codeless kext (only an `Info.plist`) tha
 
 ### Known problems
 
-- **Sleep** doesn't work. Use `pmset -a sleep 0` ([step 10](#step-10-after-it-works)).
+- **Sleep** is experimental; [Sleep (S3)](#sleep-s3) lists what is confirmed. Without its SSDTs, use
+  `pmset -a sleep 0` ([step 10](#step-10-after-it-works)).
+- **`Invalid TG (-1)` in the kernel log.** With an external monitor connected, the framebuffer logs about 750 of
+  these lines a minute. They are harmless: the value they are about is never used for frame timing. The fix that
+  removed them in 1.0 (`tgfix` v2) is not in 1.1.0 while two GPU hangs that followed it on the 82TL are checked.
 - **Freezes with an external monitor.** The 82TL froze hard twice on 2026-11-12 with a monitor on the USB-C hub:
   once in normal use (the screens turned green and black), once right after the screens woke up. The cause isn't
   known yet. After such a freeze the external display stays off on purpose; see the crash guard in
@@ -598,7 +615,7 @@ busy 2–5 % of the time (two displays at 120 Hz), so FCLK is only held while th
 | | |
 |---|---|
 | **Control file** | `/Users/Shared/rmb-gfxclk.ctl`, read at boot and every second. Modes `auto` (default), `pmfw` (fixed `cap=`), `boost`, `max`. Keys `floor= cap= cap1= cap2= cap3=` (MHz), `fclkboost=` (MHz, `0` turns the FCLK boost off), `fclkmin=` (fixed FCLK floor, turns the boost off), `trace` (one log line per second) |
-| **Crash guard** | Writes `pending` to `/private/var/log/rmb-gfxclk.state` before the first limit and after each policy change, `ok` 60 s later. A boot that finds `pending` only measures until the control file is written again |
+| **Crash guard** | Writes `pending` to `/private/var/log/rmb-gfxclk.state` before the first limit and after each policy change, `ok` 60 s later. A boot that finds `pending` only measures until the control file is written again: after a forced power-off in the first minute, `touch /Users/Shared/rmb-gfxclk.ctl` turns the policy back on without a reboot |
 | **Messages** | Only GetSmuVersion, GetEnabledSmuFeatures, GetGfxclkFrequency, SetSoftMaxGfxClk, SetHardMinGfxClk, GetFclkFrequency, SetHardMinFclkByFreq (and the SOCCLK pair, opt-in). All of them are messages Linux amdgpu sends too. No GfxOff, reset or power-limit message |
 | **Kill switch** | `-rmbnogfxclk` starts no thread at all |
 | **Probes** | `tools/gfxcheck/` (Metal FMA, SGEMM, render and bandwidth probes used for the tables above) |
@@ -689,6 +706,64 @@ on-demand eviction, which costs time on every window or tab that needs a new sur
 
 ---
 
+## Sleep (S3)
+
+New in 1.1.0 and **experimental**. The 82TL's BIOS uses Modern Standby, which macOS can't do on x86, so it hides
+the S3 sleep state and macOS only reaches DarkWake. With the two SSDTs below the laptop really sleeps, and the
+kext powers the GPU down at sleep and brings it back at wake.
+
+| | |
+|---|---|
+| **Confirmed on the 82TL** | S3 entered and resumed many times; the GPU and the panel come back, the panel at 120 Hz; wake by the RTC alarm (`pmset schedule wake`) |
+| **Not confirmed yet** | Wake from real S3 by the keyboard, the power button or the lid; long sleeps; an external monitor after a wake |
+| **Known problem** | A USB-C hub wakes the laptop a few seconds into every sleep (PME on XHC3). Unplug it before sleeping |
+| **At sleep** | KIQ submits fail at once instead of timing out, then the PSP rings and TAs are torn down |
+| **At wake** | VBIOS POST before the PSP comes up, a stale TMR is reloaded, the kernel GART entries lost in S3 are put back, the display clock is voted again |
+| **Turn it off** | `-rmbnos3` (the kext then behaves like 1.0) |
+
+**Setup on the 82TL (BIOS CB-01).** On another laptop, check your DSDT first (the comments in the `.dsl` files in
+[`dist/acpi/`](dist/acpi) explain what each table relies on).
+
+1. Copy [`dist/acpi/SSDT-S3.aml`](dist/acpi/SSDT-S3.aml) and [`dist/acpi/SSDT-XHCWAKE.aml`](dist/acpi/SSDT-XHCWAKE.aml)
+   to `EFI/OC/ACPI` and add both to **ACPI → Add**.
+   - `SSDT-S3` gives macOS the `_S3` state the BIOS hides. Windows and Linux don't see it.
+   - `SSDT-XHCWAKE` stops XHC0 and XHC1 from waking S3. Without it the MediaTek Bluetooth wakes the laptop 6 to 8
+     seconds into every sleep. The cost: devices on those two controllers (Bluetooth, the USB-A port) can't wake it.
+2. Add this entry to **ACPI → Patch** (`SSDT-XHCWAKE` needs it; `Base`, `Mask` and `ReplaceMask` stay empty):
+
+   | Key | Value |
+   |---|---|
+   | `Comment` | `XHC0+XHC1 _PRW to XPRW (SSDT-XHCWAKE)` |
+   | `TableSignature` | `53534454` (`SSDT`) |
+   | `OemTableId` | `43422D3031202020` (`CB-01   `) |
+   | `TableLength` | `20411` |
+   | `Find` | `1445065F50525708` |
+   | `Replace` | `1445065850525708` |
+   | `Count` | `2` |
+   | `Skip`, `Limit`, `BaseSkip` | `0` |
+
+3. Install the safety net. If the GPU doesn't come back from a sleep, it turns sleep off and restarts cleanly; if
+   a boot ended in the middle of a sleep, it turns sleep off at the next boot:
+   ```sh
+   sudo sh tools/s3guard/install.sh
+   ```
+4. Reboot, then allow sleep and turn off the extras that wake the laptop:
+   ```sh
+   sudo pmset -a disablesleep 0 standby 0 powernap 0 proximitywake 0
+   ```
+   Apple menu → **Sleep** now really sleeps. For idle sleep, also set a timer in minutes, for example
+   `sudo pmset -a sleep 15` (step 10 set it to 0).
+5. Test the first sleep with a safety alarm, so the laptop wakes even if nothing else wakes it:
+   ```sh
+   sudo pmset schedule wake "$(date -v+2M '+%m/%d/%y %H:%M:%S')"
+   ```
+   Then Apple menu → **Sleep**. Afterwards, `pmset -g sched` lists alarms that are still pending.
+
+If sleep stops working, `/private/var/log/rmb-s3guard.state` says whether s3guard turned it off and why;
+`sudo pmset -a disablesleep 0` turns it back on.
+
+---
+
 ## How it works
 
 ```
@@ -728,7 +803,7 @@ OpenCore ──► Lilu ──► Rembrandt660M.kext
 | `-rmbnoextreplay` | Turn off the replay of a connect event swallowed at boot |
 | `-rmbnogfxclk` | Turn off the GPU clock policy (the PMFW keeps its boot limits) |
 | `-rmbnoedidfix` | Turn off the EDID repair (panel falls back to 60 Hz) |
-| `-rmbnotgfix` | Turn off the timing generator fix (the `Invalid TG (-1)` messages and late flips come back) |
+| `-rmbnotgfix` | Turn off the timing generator fix (with one display, the `Invalid TG (-1)` messages come back) |
 | `-rmbnodispclk` | Keep dispclk/dppclk at 600 MHz (the panel's 120 Hz mode falls back to a real 72 Hz, 4K120 HDMI flashes green) |
 | `-rmbxhciintr1` | Turn off the xHCI interrupter fix (cursor stutters again) |
 | `-rmbnovcnfix` | Turn off hardware video decode (no VCN hooks, software codecs) |
@@ -740,6 +815,9 @@ OpenCore ──► Lilu ──► Rembrandt660M.kext
 | `rmbblramp=<ms>` | Time constant of the backlight smoother, default 50, at most 2000; `0` turns it off |
 | `-rmbnovtrim` | Turn off the VRAM cache trim |
 | `rmbvtrim=<MB>` | Free VRAM reserve of the trim, default 512, 64 to 2048; `0` turns it off |
+| `-rmbnos3` | Turn off the S3 sleep path (no GPU power-down at sleep, as in 1.0) |
+| `-rmbnos3psp` | Keep the PSP running at sleep (S3 diagnostic) |
+| `-rmbnotmrfix` | Don't retry the PSP TMR load after an S3 wake (S3 diagnostic) |
 
 ---
 
@@ -832,7 +910,8 @@ boot-arg.
 
 **ACPI → Add.** `SSDT-EC`, `SSDT-USBX`, `SSDT-PLUG-ALT`, `SSDT-HPET` (with the matching IRQ renames),
 `SSDT-PNLF-AMD` and `SSDT-ALS0`, plus two written for this laptop: `SSDT-I2C-POLL` (touchpad in polling mode) and
-`SSDT-BRTKEY` (F5/F6 brightness keys, see below).
+`SSDT-BRTKEY` (F5/F6 brightness keys, see below). For sleep, also `SSDT-S3` and `SSDT-XHCWAKE` with one ACPI patch
+([Sleep (S3)](#sleep-s3)).
 
 **Brightness.** Apple's driver has no entry for the panel, so the slider stays off unless the codeless
 `dist/RmbPanel660M.kext` injects a panel table for the panel's ID (`F10T0aa8`, BOE NE145F8M-N61). `SSDT-BRTKEY` makes the EC send the F5/F6
@@ -857,7 +936,10 @@ graphical picker).
 |---|---|
 | [`install.command`](install.command) | Installer for step 8 (test stick or internal EFI, with a checked backup) and step 10 |
 | [`doctor.command`](doctor.command) | Checks the install and packs the logs for an issue (private data masked) |
-| [`dist/`](dist) | Built `Rembrandt660M.kext` and the codeless panel injector `RmbPanel660M.kext` |
+| [`dist/`](dist) | Built `Rembrandt660M.kext` (1.1.0) and the codeless panel injector `RmbPanel660M.kext` |
+| [`dist/acpi/`](dist/acpi) | `SSDT-S3` and `SSDT-XHCWAKE` for [sleep](#sleep-s3) on the 82TL, built (`.aml`) and source (`.dsl`) |
+| [`tools/s3guard/`](tools/s3guard) | Sleep safety net (a LaunchDaemon that turns sleep off if a wake fails) |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release |
 | [`src/Rembrandt660M/`](src/Rembrandt660M) | Plugin source (`display.cpp`, `smu.cpp`, `dmub.cpp`, `umdpatch.cpp`, …) |
 | [`build/`](build) | Lilu 1.7.3 headers and runtime used to build and ABI-check the kext |
 | [`tests/`](tests) | Offline source and contract tests |

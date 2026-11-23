@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Install guide
+    url: https://github.com/rthh21/660m-Metal#install-guide-step-by-step
+    about: Step-by-step setup, from checking the GPU to turning on acceleration.
+  - name: If something goes wrong
+    url: https://github.com/rthh21/660m-Metal#if-something-goes-wrong
+    about: Common problems and what to do about them.
