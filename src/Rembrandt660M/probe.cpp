@@ -463,8 +463,9 @@ uint32_t wrapStartKIQ(void *object, uint64_t a1, uint64_t a2, const void *specif
 	// No cross-VM GART restore or CP reset is issued on a Lenovo cold boot. First start after an S3 wake
 	// only (GPD bare metal): put back the kernel GART PTEs lost in S3 (Apple never re-maps them; the KIQ
 	// ring page is among them), deactivate stale HQDs, clear the sticky GCVM fault status.
-	if (gS3WakePending) {
+	if (gS3WakePending && gGpuDownForSleep) {
 		gS3WakePending = false;
+		gGpuDownForSleep = false;
 		gartRestore("before startKIQ (S3 wake)");
 		if (!checkKernelArgument("-rmbnos3cpreset"))
 			cpResetQueues();

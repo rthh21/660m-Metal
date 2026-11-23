@@ -90,7 +90,7 @@ extern volatile bool gKiqSleepSkip;
 extern bool gS3Enabled;
 extern volatile bool gS3WakePending;    // sleep entry -> first startKIQ after the wake
 extern volatile bool gPspInWake;        // inside the wake's psp_power_up_event
-extern volatile bool gGpuDownForSleep;  // psp_power_down_event ran for the current sleep
+extern volatile bool gGpuDownForSleep;  // psp_power_down_event ran for this sleep; cleared by startKIQ's S3 prep
 extern uint32_t gS3Cycles;
 void diskLogSync(unsigned ms);
 void syncSdmaAddrConfig(const char *when);
@@ -99,6 +99,10 @@ void dmubResetForLoad();
 void inboxReset();
 // VBIOSSMC (Rembrandt display SMU mailbox) message; returns the response, arg reg holds the granted value.
 uint32_t vbiosSmcSend(uint32_t msg, uint32_t param);
+// Display clock vote bookkeeping (display.cpp): DMCUB-release votes, re-vote after an S3 wake.
+void dispClkNoteSet(uint32_t mhz);
+void dispClkReapply(const char *why);
+extern volatile bool gDispClkWakePending;  // GPU came back from S3: re-vote dispclk at full wake
 void edpPanelPowerLost();
 // System shutdown/sleep is coming: let DAL turn the eDP panel off for real (nullptr: stop).
 void edpAllowPowerOff(const char *why);

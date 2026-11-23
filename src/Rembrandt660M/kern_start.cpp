@@ -146,12 +146,15 @@ static uint64_t wrap_psp_power_up_event(uint64_t psp, uint64_t b, uint64_t c, ui
 	auto r = reinterpret_cast<Fn6>(org_psp_power_up_event)(psp, b, c, d, e, f);
 	gPspInWake = false;
 	if (wake) {
-		gGpuDownForSleep = false;
+		// gGpuDownForSleep stays set until the S3 prep in startKIQ (HasPoweredOn may come in between).
 		// Fixed strings for the user-space guard (org.rmb.s3guard): FAILED -> no more sleep + clean restart.
 		if (r & 0xFFFFFFFF)
 			LOG("s3guard: WAKE FAILED psp_power_up_event = %llx", r & 0xFFFFFFFF);
 		else
+		{
+			gDispClkWakePending = true;
 			LOG("s3guard: wake OK psp_power_up_event = 0");
+		}
 		diskLogSync(1000);
 	}
 	return r;

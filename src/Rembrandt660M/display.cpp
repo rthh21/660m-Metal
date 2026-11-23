@@ -1123,21 +1123,48 @@ bool gNoDispClk;
 constexpr uint32_t ClkSrcHdmi = 4;
 uint32_t gClkReqKhz[5];
 
-static void voteDispClk(uint32_t src, uint32_t pixKhz) {
-	static uint32_t cur = 600;
-	gClkReqKhz[src] = pixKhz;
-	uint32_t maxKhz = 0;
+// What the PMFW has been told last (voteDispClk skips equal votes). The DMCUB-release votes in dmub.cpp
+// (600) and an S3 resume (PMFW restarts at its default) change it behind our back: 11-19 S3 wake, DAL went
+// straight to the eDP 120 Hz DTO (785 MHz), 794 == cached 794 -> skipped, dispclk stayed 600 -> 72.4 Hz.
+static uint32_t gDispClkCur = 600;
+
+static uint32_t dispClkWant(uint32_t &maxKhz) {
+	maxKhz = 0;
 	for (auto k : gClkReqKhz)
 		maxKhz = k > maxKhz ? k : maxKhz;
 	uint32_t mhz = (uint32_t)(((uint64_t)maxKhz * 101 + 99999) / 100000);
-	mhz = mhz < 600 ? 600 : mhz > 1200 ? 1200 : mhz;
-	if (gNoDispClk || mhz == cur)
+	return mhz < 600 ? 600 : mhz > 1200 ? 1200 : mhz;
+}
+
+static void voteDispClk(uint32_t src, uint32_t pixKhz) {
+	gClkReqKhz[src] = pixKhz;
+	uint32_t maxKhz;
+	uint32_t mhz = dispClkWant(maxKhz);
+	if (gNoDispClk || mhz == gDispClkCur)
 		return;
 	uint32_t r1 = vbiosSmcSend(0x4, mhz), g1 = mmioRead(0x16293);  // SetDispclkFreq
 	uint32_t r2 = vbiosSmcSend(0x6, mhz), g2 = mmioRead(0x16293);  // SetDppclkFreq
 	LOG("dmub-cmd: %s%u %u kHz (max %u): dispclk %u -> %u MHz (resp %x granted %u), dppclk (resp %x granted %u)",
-		src == ClkSrcHdmi ? "ext stream " : "DP DTO", src == ClkSrcHdmi ? 0 : src, pixKhz, maxKhz, cur, mhz, r1, g1, r2, g2);
-	cur = mhz;
+		src == ClkSrcHdmi ? "ext stream " : "DP DTO", src == ClkSrcHdmi ? 0 : src, pixKhz, maxKhz, gDispClkCur, mhz, r1, g1,
+		r2, g2);
+	gDispClkCur = mhz;
+}
+
+// The DMCUB-release votes (dmub.cpp) just set the PMFW's dispclk to `mhz`.
+void dispClkNoteSetImpl(uint32_t mhz) { gDispClkCur = mhz; }
+
+// Send what the known streams need now, even if equal to the cache: after an S3 resume and DMCUB
+// re-releases the PMFW's dispclk is not what we voted. Not used on the cold-boot path.
+void dispClkReapplyImpl(const char *why) {
+	uint32_t maxKhz;
+	uint32_t want = dispClkWant(maxKhz);
+	if (gNoDispClk)
+		return;
+	uint32_t r1 = vbiosSmcSend(0x4, want), g1 = mmioRead(0x16293);
+	uint32_t r2 = vbiosSmcSend(0x6, want), g2 = mmioRead(0x16293);
+	LOG("dispclk: reapply (%s): %u MHz for max stream %u kHz (cached %u): dispclk resp %x granted %u, dppclk resp %x "
+		"granted %u", why, want, maxKhz, gDispClkCur, r1, g1, r2, g2);
+	gDispClkCur = want;
 }
 
 // Called for DAL's DP DTO PHASE/MODULO writes (DAL's values, before the MODULO rescale).
@@ -1871,6 +1898,11 @@ uint64_t wrapExecTable(uint64_t helper, uint64_t index, uint64_t params, uint64_
 }
 
 }  // namespace
+
+// External entry points (dmub.cpp DMCUB release, firmware.cpp S3 full wake) for the dispclk bookkeeping
+// in the namespace above.
+void dispClkNoteSet(uint32_t mhz) { dispClkNoteSetImpl(mhz); }
+void dispClkReapply(const char *why) { dispClkReapplyImpl(why); }
 
 void edpAllowPowerOff(const char *why) {
 	if (gKeepEdpOffAlways || gKeepEdpOff)

@@ -16,8 +16,9 @@
 bool gS3Enabled;
 volatile bool gS3WakePending;  // sleep entry -> first startKIQ after wake (GART restore + CP queue reset)
 volatile bool gPspInWake;      // inside psp_power_up_event after a sleep
-volatile bool gGpuDownForSleep;  // psp_power_down_event ran for this sleep; cleared by the wake power_up_event
+volatile bool gGpuDownForSleep;  // psp_power_down_event ran for this sleep; cleared by the wake's startKIQ prep
 uint32_t gS3Cycles;
+volatile bool gDispClkWakePending;
 
 namespace {
 
@@ -85,13 +86,19 @@ IOReturn powerHandler(void *, void *, UInt32 type, IOService *, void *arg, vm_si
 	}
 	else if (type == kIOMessageSystemHasPoweredOn) {
 		diskLogSleep(false);
-		LOG("s3guard: full wake (GPU %s)", gGpuDownForSleep ? "still down, power-up pending" : "was not powered down");
-		if (!gGpuDownForSleep) {  // sleep aborted before the GPU went down: nothing to redo at the next start
+		LOG("s3guard: full wake (GPU %s)", gGpuDownForSleep ? "went down, restart pending/in progress" : "not down or already restarted");
+		if (!gGpuDownForSleep) {  // sleep aborted before the GPU went down (or wake already done): nothing to redo
 			gS3WakePending = false;
 			gWakePost = false;
 		}
 		gKiqSleepSkip = false;
 		edpAllowPowerOff(nullptr);  // aborted or finished sleep: wake training OFFs must stay NULLed
+		// The PMFW restarted at its default dispclk (11-19: eDP 72.4 Hz after the first S3 wake). The DMCUB
+		// re-release re-votes too; this one covers a wake where DAL wrote its DTOs before that release.
+		if (gDispClkWakePending) {
+			gDispClkWakePending = false;
+			dispClkReapply("S3 full wake");
+		}
 		panelWakeWatch();
 		gEdpLinkPause = false;
 		gEdpLinkKick = true;

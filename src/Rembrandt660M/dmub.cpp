@@ -7,12 +7,20 @@
 
 #include "rmb.hpp"
 #include <IOKit/IOLib.h>
+#include <libkern/OSAtomic.h>
 #include <kern/thread.h>
 #include <Headers/kern_api.hpp>
 
 // VBIOSSMC mailbox (MP1_SMN_C2PMSG_67/83/91), as dcn31_smu_send_msg_with_param.
+// One message at a time: the S3 full-wake dispclk resync (power notifier thread) can meet DAL's DTO votes and
+// the DMCUB poller. Busy-wait like the mailbox waits below (no new sleeping), go on after 200 ms regardless.
+static volatile UInt32 gSmcBusy;
+
 uint32_t vbiosSmcSend(uint32_t msg, uint32_t param) {
 	constexpr uint32_t Msg = 0x16283, Arg = 0x16293, Resp = 0x1629b;
+	bool owned = false;
+	for (uint32_t t = 0; t < 20000 && !(owned = OSCompareAndSwap(0, 1, &gSmcBusy)); t++)
+		IODelay(10);
 	for (uint32_t t = 0; t < 1000 && mmioRead(Resp) == 0; t++)
 		IODelay(10);
 	mmioWrite(Resp, 0);
@@ -21,6 +29,8 @@ uint32_t vbiosSmcSend(uint32_t msg, uint32_t param) {
 	uint32_t r = 0;
 	for (uint32_t t = 0; t < 20000 && (r = mmioRead(Resp)) == 0; t++)
 		IODelay(10);
+	if (owned)
+		OSCompareAndSwap(1, 0, &gSmcBusy);
 	return r;
 }
 
@@ -173,6 +183,12 @@ void poll(void *, wait_result_t) {
 					uint32_t r = vbiosSmcSend(v.msg, v.mhz);
 					LOG("dmub: VBIOSSMC Set%s(%u) resp %x arg %u, PHY %x", v.name, v.mhz, r, mmioRead(0x16293), phyPeek());
 				}
+				// Dispclk is 600 again: tell voteDispClk. A re-release (S3 wake, DAL DMCUB reset) also re-votes the
+				// streams already known, since DAL may write the same DTO as before and voteDispClk skips equal
+				// votes (11-19: 72.4 Hz after the first S3 wake). Cold boot (first release): as before, no extra vote.
+				dispClkNoteSet(600);
+				if (released > 1)
+					dispClkReapply("DMCUB re-release");
 			}
 		} else if (!want && !(cntl2 & 1) && released) {
 			// DAL reset the DMCUB (DCN 3.0 style): mirror it into CNTL2.
