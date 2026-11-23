@@ -12,7 +12,7 @@ KDK_EXTENSIONS ?= $(KDK)/System/Library/Extensions
 KERNEL_INPUT ?= $(KDK)/System/Library/Kernels/kernel
 LILU_RUNTIME ?= $(ROOT)/build/runtime-inputs/Lilu
 NAME   := Rembrandt660M
-VER    := 0.1.0
+VER    := 1.1.0
 KFLAGS := -target x86_64-apple-macos10.15 -mkernel -nostdinc -fno-builtin -fno-common -mno-red-zone -O2 \
           -fno-asynchronous-unwind-tables -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
           -I$(SDK)/Headers -I$(LILU)
