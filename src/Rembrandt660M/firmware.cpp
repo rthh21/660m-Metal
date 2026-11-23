@@ -11,6 +11,14 @@
 #include <IOKit/IOMessage.h>
 #include <IOKit/pwr_mgt/RootDomain.h>
 
+// Bare-metal S3 (2026-11-18): the GPD sleep path, wired up for the Lenovo. -rmbnos3: none of it (no
+// notifier, no power_down/power_up/vbs routes), i.e. the pre-S3 kext.
+bool gS3Enabled;
+volatile bool gS3WakePending;  // sleep entry -> first startKIQ after wake (GART restore + CP queue reset)
+volatile bool gPspInWake;      // inside psp_power_up_event after a sleep
+volatile bool gGpuDownForSleep;  // psp_power_down_event ran for this sleep; cleared by the wake power_up_event
+uint32_t gS3Cycles;
+
 namespace {
 
 struct Substitution {
@@ -24,6 +32,7 @@ struct Substitution {
 mach_vm_address_t orgPspTmrInit;
 mach_vm_address_t gPspTmrUnload;
 mach_vm_address_t gPspRingStop;
+mach_vm_address_t orgPspPowerDown;
 uint64_t gPsp;
 IONotifier *gPowerNotifier;
 
@@ -49,6 +58,12 @@ void pspTeardownSeq(uint64_t p, const char *tag) {
 	}
 }
 IOReturn powerHandler(void *, void *, UInt32 type, IOService *, void *arg, vm_size_t) {
+	// Lenovo bare metal: shutdown and restart stay exactly as before this notifier existed (no eDP
+	// replay, no PSP teardown, no halt): the cold-boot path never needed them and on GPD they were VM
+	// restart helpers. -rmbs3shutdownsteps: GPD behaviour.
+	if ((type == kIOMessageSystemWillPowerOff || type == kIOMessageSystemWillRestart) &&
+	    !checkKernelArgument("-rmbs3shutdownsteps"))
+		return kIOReturnSuccess;
 	if (type == kIOMessageSystemWillPowerOff || type == kIOMessageSystemWillRestart) {
 		LOG("shutdown: %s received", type == kIOMessageSystemWillPowerOff ? "WillPowerOff" : "WillRestart");
 		edpAllowPowerOff("shutdown");
@@ -57,16 +72,24 @@ IOReturn powerHandler(void *, void *, UInt32 type, IOService *, void *arg, vm_si
 	else if (sleepEntering(type, arg)) {
 		if (type != kIOMessageSystemWillSleep)
 			LOG("sleep: from dark wake (capability change drops CPU)");
+		gS3Cycles++;
+		LOG("s3guard: sleep entry #%u (%s)", gS3Cycles, type == kIOMessageSystemWillSleep ? "WillSleep" : "from dark wake");
 		vramCrcStep("sleep");
 		diskLogSleep(true);
 		gKiqSleepSkip = true;
 		edpAllowPowerOff("sleep");
 		gWakeWatchArmed = true;
 		gWakePost = true;
+		gS3WakePending = true;
 		gEdpLinkPause = true;
 	}
 	else if (type == kIOMessageSystemHasPoweredOn) {
 		diskLogSleep(false);
+		LOG("s3guard: full wake (GPU %s)", gGpuDownForSleep ? "still down, power-up pending" : "was not powered down");
+		if (!gGpuDownForSleep) {  // sleep aborted before the GPU went down: nothing to redo at the next start
+			gS3WakePending = false;
+			gWakePost = false;
+		}
 		gKiqSleepSkip = false;
 		edpAllowPowerOff(nullptr);  // aborted or finished sleep: wake training OFFs must stay NULLed
 		panelWakeWatch();
@@ -115,16 +138,33 @@ const char *tmrStageName(rem660::psp::TmrStage stage) {
 	return "?";
 }
 uint32_t wrapPspTmrInit(void *state) {
-	// Preserve the first native status. No TMR destroy/retry, shutdown notifier,
-	// MODE2, TA teardown or cross-VM ownership assumptions on Lenovo.
+	// Cold boot: preserve the first native status (no TMR destroy/retry, MODE2 or cross-VM assumptions).
+	// S3 wake only (gPspInWake, set around psp_power_up_event): if LOAD_TOC still finds the old TMR, unload
+	// it and retry once, as GPD did (-rmbnotmrfix: don't).
 	rem660::psp::TmrReport rep {};
 	auto r = rem660::psp::initWithYellowCarpToc(state, fw_yc_toc, FW_SIZE(toc),
 		reinterpret_cast<rem660::psp::TmrInit>(orgPspTmrInit), &rep);
-	LOG("fw: psp_tmr_init = %#x (%s); TOC %#x -> %#x bytes, native %#x", r, tmrStageName(rep.stage),
-	    rep.tocBytesBefore, rep.tocBytesSelected, rep.nativeStatus);
+	LOG("fw: psp_tmr_init = %#x (%s); TOC %#x -> %#x bytes, native %#x%s", r, tmrStageName(rep.stage),
+	    rep.tocBytesBefore, rep.tocBytesSelected, rep.nativeStatus, gPspInWake ? " [S3 wake]" : "");
 	LOG("fw: psp staging %#llx bytes gpu %#llx cpu %s handle %s; TMR %#llx bytes gpu %#llx cpu %s handle %s",
 	    rep.stagingBytes, rep.stagingGpu, rep.stagingCpu ? "set" : "null", rep.stagingHandle ? "set" : "null",
 	    rep.tmrBytes, rep.tmrGpu, rep.tmrCpu ? "set" : "null", rep.tmrHandle ? "set" : "null");
+	if (r && gPspInWake && gPspTmrUnload && !checkKernelArgument("-rmbnotmrfix")) {
+		auto u = reinterpret_cast<uint64_t (*)(uint64_t)>(gPspTmrUnload)(reinterpret_cast<uint64_t>(state));
+		rep = {};
+		r = rem660::psp::initWithYellowCarpToc(state, fw_yc_toc, FW_SIZE(toc),
+			reinterpret_cast<rem660::psp::TmrInit>(orgPspTmrInit), &rep);
+		LOG("fw: S3 wake stale TMR: psp_tmr_unload = %llx, retry psp_tmr_init = %#x (%s)", u & 0xFFFFFFFF, r,
+		    tmrStageName(rep.stage));
+	}
+	// Arm the sleep/wake notifier once the PSP is up (it also needs gPsp for the teardown).
+	if (!r && gS3Enabled) {
+		gPsp = reinterpret_cast<uint64_t>(state);
+		if (!gPowerNotifier)
+			gPowerNotifier = registerPrioritySleepWakeInterest(powerHandler, nullptr, nullptr);
+		LOG("s3: armed (notifier %s, teardown %s, ring_stop %s)", gPowerNotifier ? "ok" : "MISSING",
+		    orgPspPowerDown ? "routed" : "NOT routed", gPspRingStop ? "ok" : "missing");
+	}
 	return r;
 }
 
@@ -175,12 +215,19 @@ uint64_t wrapSdmaGetConfig(uint64_t sdma, uint64_t b, uint64_t c, uint64_t d, ui
 // PSP keeps its state. The guest's S3 wake re-inits the PSP from scratch (power_up_event calls
 // psp_hardware_initialization), but the old TMR still holds DMUB, so its LOAD_IP_FW fails with
 // 0x80000029/0x80000007 (s3wake4). Do the full branch's teardown too (-rmbnos3psp: don't).
-mach_vm_address_t orgPspPowerDown;
+// Lenovo bare metal 11-12 (no teardown): the wake's KM ring create timed out -> TTL::powerUp 0xe00002bc.
 uint64_t wrapPspPowerDown(uint64_t psp, uint64_t flags, uint64_t c, uint64_t d, uint64_t e, uint64_t f) {
+	// Only inside a system sleep our notifier saw (gS3WakePending). 11-16..18: 12 display sleeps, 0
+	// TTL::powerDown, so this is a guard, not a known case; anything else stays native.
+	if (!gS3WakePending || !psp || !flags) {
+		LOG("psp-sleep: power_down_event outside system sleep (pending %d), native only", gS3WakePending);
+		return reinterpret_cast<Fn6>(orgPspPowerDown)(psp, flags, c, d, e, f);
+	}
 	bool light = !(*reinterpret_cast<uint64_t *>(psp + 0x28) & 0x20) && (*reinterpret_cast<uint8_t *>(flags) & 1);
 	gartCensus("sleep entry");
 	auto r = reinterpret_cast<Fn6>(orgPspPowerDown)(psp, flags, c, d, e, f);
 	LOG("psp-sleep: power_down_event (%s branch), C2PMSG_64 %08x", light ? "light" : "full/none", mmioRead(0x16080));
+	diskLogSync(1000);  // a hang in the teardown below must leave this line on disk
 	edpPanelPowerLost();
 	if (light && gPspRingStop && !checkKernelArgument("-rmbnos3psp")) {
 		pspTeardownSeq(psp, "psp-sleep");
@@ -199,6 +246,9 @@ uint64_t wrapPspPowerDown(uint64_t psp, uint64_t flags, uint64_t c, uint64_t d, 
 		gartSave();
 	}
 	vramCrcStep("psp-sleep");
+	gGpuDownForSleep = true;
+	LOG("s3guard: GPU down for sleep (teardown %s)", light && gPspRingStop && !checkKernelArgument("-rmbnos3psp") ? "done" : "skipped");
+	diskLogSync(1000);
 	return r;
 }
 
@@ -299,4 +349,30 @@ void firmwareRoute(KernelPatcher &patcher, size_t index, mach_vm_address_t addre
  bool cfgOk = restoredRouteGroup(patcher, 0, cfgReqs, arrsize(cfgReqs), address, size);
  LOG("fw: PSP firmware-load config guards: gc %s, sdma %s%s", orgGcGetConfig ? "routed" : "NOT routed",
      orgSdmaGetConfig ? "routed" : "NOT routed", cfgOk ? "" : " (group reported failure)");
+ // Bare-metal S3, own group: a failure leaves sleep as before (no teardown) and touches nothing above.
+ if (checkKernelArgument("-rmbnos3")) {
+  LOG("s3: off (-rmbnos3)");
+  return;
+ }
+ gPspTmrUnload = findSymbol(patcher, 0, "_psp_tmr_unload", address, size);
+ gPspRingStop = findSymbol(patcher, 0, "_psp_ring_stop", address, size);
+ size_t found = 0;
+ for (size_t i = 0; i < arrsize(pspTeardown); i++) {
+  gPspTeardown[i] = findSymbol(patcher, 0, pspTeardown[i], address, size);
+  found += gPspTeardown[i] != 0;
+ }
+ patcher.clearError();
+ if (!gPspRingStop || found != arrsize(pspTeardown)) {
+  LOG("s3: PSP teardown symbols missing (ring_stop %d, %zu/%zu unloads), S3 path NOT armed", gPspRingStop != 0, found,
+      arrsize(pspTeardown));
+  gPspRingStop = 0;
+  return;
+ }
+ KernelPatcher::RouteRequest s3Reqs[] {
+  {"_psp_power_down_event", wrapPspPowerDown, orgPspPowerDown},
+ };
+ bool s3Ok = restoredRouteGroup(patcher, 0, s3Reqs, arrsize(s3Reqs), address, size) && orgPspPowerDown;
+ patcher.clearError();
+ gS3Enabled = s3Ok;
+ LOG("s3: psp_power_down_event %s, teardown %zu unloads + ring_stop resolved", s3Ok ? "routed" : "NOT routed", found);
 }

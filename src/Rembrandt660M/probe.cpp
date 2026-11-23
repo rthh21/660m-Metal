@@ -394,6 +394,14 @@ void dumpCP(const char *when) {
 mach_vm_address_t orgSubmitKIQFrame;
 uint8_t wrapSubmitKIQFrame(void *self) {
  if(!orgSubmitKIQFrame) return 0;
+ // Sleep entry (GPD, VM and bare metal): the MEC never answers Apple's UNMAP here (5 s stamp timeout)
+ // and one BM sleep died 3.5 s into that wait. Fail at once like Apple's "KIQ ring is disabled" path
+ // (nothing committed, no doorbell). Set by the S3 notifier, cleared by startKIQ/HasPoweredOn.
+ if(gKiqSleepSkip && !checkKernelArgument("-rmbkiqsleep")) {
+  static int n;
+  if(n++ < 8) LOG("sleep: KIQ submit skipped (#%d)", n);
+  return 0;
+ }
  auto result=reinterpret_cast<rem660::abi25::KiqSubmit>(orgSubmitKIQFrame)(self);
  LOG("KIQ submit/wait native result=%u",result);
  return result; // no register writes/queue reset after a failed fence wait
@@ -452,7 +460,19 @@ uint32_t wrapStartKIQ(void *object, uint64_t a1, uint64_t a2, const void *specif
 	    q(ring,0x48),q(ring,0xb8),q(ring,0xd0),a1,a2);
 	rem660::gpu::KiqOutput out{};
 	gKiqSleepSkip = false;
-	// No cross-VM GART restore or CP reset is issued on a Lenovo cold boot.
+	// No cross-VM GART restore or CP reset is issued on a Lenovo cold boot. First start after an S3 wake
+	// only (GPD bare metal): put back the kernel GART PTEs lost in S3 (Apple never re-maps them; the KIQ
+	// ring page is among them), deactivate stale HQDs, clear the sticky GCVM fault status.
+	if (gS3WakePending) {
+		gS3WakePending = false;
+		gartRestore("before startKIQ (S3 wake)");
+		if (!checkKernelArgument("-rmbnos3cpreset"))
+			cpResetQueues();
+		mmioWrite(GC0 + 0x15c4, gc(0x15c4) | 1);
+		IODelay(10);
+		mmioWrite(GC0 + 0x15c4, gc(0x15c4) & ~1u);
+		LOG("startKIQ: S3 wake prep done, fault status %x", gc(0x15c8));
+	}
 	auto owner = q(self, 0x20);
 	if(!owner) return 0xe00002c2;
 	auto svc = reinterpret_cast<uint64_t (*)(uint64_t)>((*reinterpret_cast<uint64_t **>(owner))[0x2c0 / 8])(owner);

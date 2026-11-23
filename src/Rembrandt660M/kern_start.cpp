@@ -120,8 +120,11 @@ static uint64_t wrap_vbs_hw_init(uint64_t vbs, uint64_t b, uint64_t c, uint64_t 
 	return reinterpret_cast<Fn6>(org_vbs_hw_init)(vbs, b, c, d, e, f);
 }
 static uint64_t wrap_psp_power_up_event(uint64_t psp, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f) {
+	bool wake = gWakePost;
 	if (gWakePost) {
 		gWakePost = false;
+		LOG("s3guard: GPU power-up after sleep #%u (teardown at sleep: %s)", gS3Cycles, gGpuDownForSleep ? "yes" : "NO");
+		diskLogSync(1000);
 		vramCrcStep("wake start");
 		uint32_t before = mmioRead(0x63db);
 		if (checkKernelArgument("-rmbnowakepost") || !gVbs || !org_vbs_post) {
@@ -139,7 +142,19 @@ static uint64_t wrap_psp_power_up_event(uint64_t psp, uint64_t b, uint64_t c, ui
 		}
 		pwrseqWakeArm();
 	}
-	return reinterpret_cast<Fn6>(org_psp_power_up_event)(psp, b, c, d, e, f);
+	gPspInWake = wake;
+	auto r = reinterpret_cast<Fn6>(org_psp_power_up_event)(psp, b, c, d, e, f);
+	gPspInWake = false;
+	if (wake) {
+		gGpuDownForSleep = false;
+		// Fixed strings for the user-space guard (org.rmb.s3guard): FAILED -> no more sleep + clean restart.
+		if (r & 0xFFFFFFFF)
+			LOG("s3guard: WAKE FAILED psp_power_up_event = %llx", r & 0xFFFFFFFF);
+		else
+			LOG("s3guard: wake OK psp_power_up_event = 0");
+		diskLogSync(1000);
+	}
+	return r;
 }
 
 // --- Framebuffer ---
@@ -1229,6 +1244,19 @@ static bool processHWLibs(KernelPatcher &patcher, size_t index, mach_vm_address_
 
 	smuRoute(patcher, 0, address, size);
 	firmwareRoute(patcher, 0, address, size);
+	// Bare-metal S3 wake side (only when firmwareRoute armed the sleep side): vbs_hw_init keeps the vbs
+	// object, psp_power_up_event runs vbs_post first after a sleep. Own group, failure = no wake POST.
+	if (gS3Enabled) {
+		org_vbs_post = findSymbol(patcher, 0, "_vbs_post", address, size);
+		KernelPatcher::RouteRequest s3Reqs[] {
+			{"_vbs_hw_init", wrap_vbs_hw_init, org_vbs_hw_init},
+			{"_psp_power_up_event", wrap_psp_power_up_event, org_psp_power_up_event},
+		};
+		bool s3Ok = restoredRouteGroup(patcher, 0, s3Reqs, arrsize(s3Reqs), address, size);
+		patcher.clearError();
+		LOG("s3: wake routes: vbs_hw_init %s, psp_power_up_event %s, vbs_post %s%s", org_vbs_hw_init ? "routed" : "NOT routed",
+		    org_psp_power_up_event ? "routed" : "NOT routed", org_vbs_post ? "resolved" : "missing", s3Ok ? "" : " (group failure)");
+	}
 	vcnRouteHwLibs(patcher, 0, address, size);  // opt-in hardware video (ctl /Users/Shared/rmb-vcn.ctl)
 	LOG("required HWLibs routes installed; hardware results remain native");
 	IOLog("REM660: [processHWLibs] EXIT SUCCESS\n");

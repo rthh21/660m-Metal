@@ -86,6 +86,12 @@ inline bool sleepEntering(UInt32 type, void *arg) {
 }
 // WillSleep..startKIQ/wake: Apple's KIQ submits fail at once instead of waiting 5 s on the MEC.
 extern volatile bool gKiqSleepSkip;
+// Bare-metal S3 (firmware.cpp). gS3Enabled: power_down_event routed and teardown resolved (-rmbnos3: off).
+extern bool gS3Enabled;
+extern volatile bool gS3WakePending;    // sleep entry -> first startKIQ after the wake
+extern volatile bool gPspInWake;        // inside the wake's psp_power_up_event
+extern volatile bool gGpuDownForSleep;  // psp_power_down_event ran for the current sleep
+extern uint32_t gS3Cycles;
 void diskLogSync(unsigned ms);
 void syncSdmaAddrConfig(const char *when);
 void dmubPollerStart();

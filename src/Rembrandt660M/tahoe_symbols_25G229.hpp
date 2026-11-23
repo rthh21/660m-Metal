@@ -62,6 +62,12 @@ inline constexpr StaticSymbol kTahoeSymbols[] = {
     {"_psp_hdcp_unload", 0, 0x4b84bu},
     {"_psp_ras_unload", 0, 0x53eb4u},
     {"_psp_tmr_unload", 0, 0x4d933u},
+    // Bare-metal S3 (2026-11-18, nm of HWLibs 5580395F): PSP teardown at sleep, VBIOS POST at wake.
+    {"_psp_power_down_event", 0, 0x4a2bau},
+    {"_psp_power_up_event", 0, 0x4a1bau},
+    {"_psp_ring_stop", 0, 0x4c703u},
+    {"_vbs_hw_init", 0, 0x22e1dbu},
+    {"_vbs_post", 0, 0x22e266u},
     {"_pcie_ip_sw_init", 0, 0x23d57au},
     {"_Phw_CommonDynamicState_ApplyClocksAdjustRules", 0, 0x222ea0u},
     {"_PEM_ExcuteEventChain", 0, 0x10288bu},
