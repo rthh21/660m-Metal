@@ -3448,97 +3448,11 @@ void curDiagLog() {
 // Fix: only when the path has exactly one stream and no TG, use the one OTG whose OTG_CONTROL.OTG_MASTER_EN
 // (Seg2 + 0x1b41 + i * 0x80, as anyOtgOn) is set; with no or several running OTGs leave -1 (Apple's fallback).
 // Register reads only. -rmbnotgfix = off.
-//
-// tgfix v2 (11-15): with the internal panel and the USB-C hub monitor both up, two OTGs run (mask 3), so the
-// one-OTG guess skipped every call: 17235 "Invalid TG (-1)" in 36 min, from FB0 and FB1, i.e. a late flip
-// deadline on both displays. Root cause: cacheTgIndices fills a path only if path+0x718 bit 0 and +0x719 bit 0
-// are set (and it has streams). +0x718 is set only by AmdAgdcServices (commitStreamConfiguration 0x22e72,
-// setStreamAssociation, setMultiLinkConfig, translateConfigToDisplayPath) and the boot-mode parser; displaypolicyd
-// never commits a configuration under iMac20,1 (see extbind), so both fixed-bound paths keep +0x718 = 0 (flags
-// 0x100) and are never cached. Fix: do for this one path what cacheTgIndices 0x4ce20 does, minus the AGDC bit:
-// path index i = (path - (controller + 0x1b8)) / 0x7c8, i < controller +0xbd, controller = presenter +0x1658;
-// DAL = AmdDalHelper (controller +0x7938) getDal() (vtable +0x120 = 0x49766: returns +0x48); TG of stream j =
-// DAL vtable +0xd8 = getTgIndex 0x6bc98 (dc_stream_get_status()->primary_otg_inst; -1 plus a "dc_stream_status
-// is null" kprintf when the stream has no status). Read-only, no lock (cacheTgIndices takes none). The KDK bytes
-// of both functions are checked once and both vtable slots on every use; on any mismatch only the one-OTG guess
-// runs. After a -1 from the DAL that path is not asked again for 64 calls.
 mach_vm_address_t orgPresSetVuInt;
 int8_t gTgFix = -1;
-uint32_t gTgFixLogs, gTgDalFills, gTgDalMisses;
+uint32_t gTgFixLogs;
 constexpr uint32_t PresPathOff = 0xb0, PresVuIntervalOff = 0xf0, PathStreamCount = 0xd0, PathStream0Tg = 0xdc,
 	PathStreamSize = 400, PathMaxStreams = 4, PathModeOff = 0x758, PathFlagsOff = 0x718;
-constexpr uint32_t RvaPresSetVuInt = 0x2c148, RvaDalGetDal = 0x49766, RvaDalGetTgIndex = 0x6bc98;
-constexpr uint32_t PresCtlOff = 0x1658, CtlPathArray = 0x1b8, CtlPathStride = 0x7c8, CtlPathCount = 0xbd,
-	CtlDalHelper = 0x7938, DalHelperDal = 0x48, VtGetDal = 0x120, VtGetTgIndex = 0xd8;
-const uint8_t KdkGetDal[] {0x55, 0x48, 0x89, 0xe5, 0x48, 0x8b, 0x47, 0x48, 0x5d, 0xc3};
-// 0x6bc98..0x6bcd2: prologue, the +0x648 display-count and stream <= 5 checks, up to the first call (no relocations)
-const uint8_t KdkGetTgIndex[] {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x48, 0x8b, 0x87,
-	0x48, 0x06, 0x00, 0x00, 0xbb, 0xff, 0xff, 0xff, 0xff, 0x39, 0x70, 0x1c, 0x76, 0x78, 0x80, 0xfa, 0x05, 0x77, 0x73,
-	0x41, 0x89, 0xf6, 0x49, 0x89, 0xfc, 0x44, 0x0f, 0xb6, 0xfa, 0x41, 0x0f, 0xb6, 0xc6, 0x48, 0x8b, 0xbc, 0xc7, 0x70,
-	0x04, 0x00, 0x00, 0x44, 0x89, 0xfe};
-mach_vm_address_t gTgGetDal, gTgGetTgIndex;  // runtime addresses; 0 = DAL lookup off
-uint8_t gTgDalBackoff[8];
-
-// setVuInt = runtime address of AmdFbPresenter::setVUpdateVBlankInterval (all three are in the FB __text).
-void tgDalSetup(mach_vm_address_t setVuInt, mach_vm_address_t address, size_t size) {
-	if (!setVuInt || setVuInt < RvaPresSetVuInt) {
-		LOG("tgfix: setVUpdateVBlankInterval not found: one-OTG guess only");
-		return;
-	}
-	mach_vm_address_t slide = setVuInt - RvaPresSetVuInt, a = slide + RvaDalGetDal, b = slide + RvaDalGetTgIndex;
-	if (a < address || b < address || a + sizeof(KdkGetDal) > address + size || b + sizeof(KdkGetTgIndex) > address + size) {
-		LOG("tgfix: DAL functions outside the FB image (%llx..%llx): one-OTG guess only", address, address + size);
-		return;
-	}
-	if (memcmp(reinterpret_cast<const void *>(a), KdkGetDal, sizeof(KdkGetDal)) ||
-	    memcmp(reinterpret_cast<const void *>(b), KdkGetTgIndex, sizeof(KdkGetTgIndex))) {
-		LOG("tgfix: AmdDalHelper::getDal / DAL getTgIndex bytes differ from the 25G229 KDK: one-OTG guess only");
-		return;
-	}
-	gTgGetDal = a;
-	gTgGetTgIndex = b;
-	LOG("tgfix: DAL getTgIndex (FB+%x) and AmdDalHelper::getDal (FB+%x) verified: per-path TG from the DC stream status",
-	    RvaDalGetTgIndex, RvaDalGetDal);
-}
-
-// cacheTgIndices for one path: writes every valid TG the DAL reports, returns the first (the one the presenter
-// uses) or -1.
-int32_t tgFromDal(uint64_t pres, uint64_t path, uint32_t n) {
-	if (!gTgGetTgIndex)
-		return -1;
-	uint64_t ctl = presQ(pres, PresCtlOff);
-	if (!ctl || path < ctl + CtlPathArray)
-		return -1;
-	uint64_t d = path - (ctl + CtlPathArray);
-	uint64_t idx = d / CtlPathStride;
-	if (d % CtlPathStride || idx >= *reinterpret_cast<volatile uint8_t *>(ctl + CtlPathCount) || idx >= arrsize(gTgDalBackoff))
-		return -1;
-	if (gTgDalBackoff[idx]) {
-		gTgDalBackoff[idx]--;
-		return -1;
-	}
-	uint64_t helper = presQ(ctl, CtlDalHelper);
-	if (!helper || presQ(presQ(helper, 0), VtGetDal) != gTgGetDal)
-		return -1;
-	uint64_t dal = presQ(helper, DalHelperDal);
-	if (!dal || presQ(presQ(dal, 0), VtGetTgIndex) != gTgGetTgIndex)
-		return -1;
-	auto getTg = reinterpret_cast<int32_t (*)(uint64_t, uint32_t, uint32_t)>(gTgGetTgIndex);
-	int32_t first = -1;
-	for (uint32_t j = 0; j < n; j++) {
-		int32_t tg = getTg(dal, static_cast<uint32_t>(idx), j);
-		if (tg < 0 || tg >= 4)  // DCN 3.1.2: OTG0..3
-			continue;
-		*reinterpret_cast<volatile int32_t *>(path + PathStream0Tg + j * PathStreamSize) = tg;
-		if (first < 0)
-			first = tg;
-	}
-	if (first < 0) {
-		gTgDalMisses++;
-		gTgDalBackoff[idx] = 64;
-	}
-	return first;
-}
 
 uint64_t wrapPresSetVuInt(uint64_t pres) {
 	if (gTgFix < 0)
@@ -3546,26 +3460,18 @@ uint64_t wrapPresSetVuInt(uint64_t pres) {
 	uint64_t path = gTgFix ? presQ(pres, PresPathOff) : 0;
 	int32_t filled = -1;
 	uint32_t mask = 0, n = 0;
-	const char *how = "left";
-	if (path) {
+	if (path && mmioAvailable()) {
 		n = *reinterpret_cast<volatile uint32_t *>(path + PathStreamCount);
 		bool have = false;
 		for (uint32_t i = 0; i < n && i < PathMaxStreams; i++)
 			have |= *reinterpret_cast<volatile int32_t *>(path + PathStream0Tg + i * PathStreamSize) >= 0;
 		if (n && n <= PathMaxStreams && !have) {
-			if (mmioAvailable())
-				for (uint32_t i = 0; i < 4; i++)
-					if (mmioRead(Seg2 + 0x1b41 + i * 0x80) & 1)  // OTGn_OTG_CONTROL.OTG_MASTER_EN
-						mask |= 1u << i;
-			filled = tgFromDal(pres, path, n);
-			if (filled >= 0) {
-				how = "DAL set";
-				gTgDalFills++;
-				gTgFills++;
-			} else if (n == 1 && mask && !(mask & (mask - 1))) {
+			for (uint32_t i = 0; i < 4; i++)
+				if (mmioRead(Seg2 + 0x1b41 + i * 0x80) & 1)  // OTGn_OTG_CONTROL.OTG_MASTER_EN
+					mask |= 1u << i;
+			if (n == 1 && mask && !(mask & (mask - 1))) {
 				filled = __builtin_ctz(mask);
 				*reinterpret_cast<volatile int32_t *>(path + PathStream0Tg) = filled;
-				how = "OTG set";
 				gTgFills++;
 			} else {
 				gTgSkips++;
@@ -3576,12 +3482,12 @@ uint64_t wrapPresSetVuInt(uint64_t pres) {
 	if ((filled >= 0 || mask) && gTgFixLogs < 12) {
 		gTgFixLogs++;
 		uint16_t flags = *reinterpret_cast<volatile uint16_t *>(path + PathFlagsOff);
-		uint32_t vst = filled >= 0 && mmioAvailable() ? mmioRead(Seg2 + 0x1b87 + static_cast<uint32_t>(filled) * 0x80) : 0;
+		uint32_t vst = filled >= 0 ? mmioRead(Seg2 + 0x1b87 + filled * 0x80) : 0;
 		LOG("tgfix: FB%u path streams %u mode %x flags %x, OTG running mask %x -> %s TG %d; interval %llu (OTG reg 0x1b87 %x), "
-		    "ret %x (fills %u, DAL %u, DAL misses %u, skips %u)",
+		    "ret %x (fills %u, skips %u)",
 		    *reinterpret_cast<volatile uint8_t *>(pres + 0xa0), n, *reinterpret_cast<volatile uint32_t *>(path + PathModeOff),
-		    flags, mask, how, filled, presQ(pres, PresVuIntervalOff), vst, static_cast<uint32_t>(r), gTgFills, gTgDalFills,
-		    gTgDalMisses, gTgSkips);
+		    flags, mask, filled >= 0 ? "set" : "left", filled, presQ(pres, PresVuIntervalOff), vst,
+		    static_cast<uint32_t>(r), gTgFills, gTgSkips);
 	}
 	return r;
 }
@@ -4914,8 +4820,6 @@ void displayRoute(KernelPatcher &patcher, size_t index, mach_vm_address_t addres
 	// extSetCursorPosition is not executing while it is routed (iogdiag.cpp).
 	iogDiagRoute(patcher);
 	if (!checkKernelArgument("-rmbnotgfix")) {
-		tgDalSetup(findSymbol(patcher, 1, "__ZN29AMDRadeonX6000_AmdFbPresenter24setVUpdateVBlankIntervalEv", address, size),
-		           address, size);
 		KernelPatcher::RouteRequest tgReq {"__ZN29AMDRadeonX6000_AmdFbPresenter24setVUpdateVBlankIntervalEv", wrapPresSetVuInt,
 			orgPresSetVuInt};
 		if (!routeStaticRequests(patcher, 1, &tgReq, 1, address, size))
